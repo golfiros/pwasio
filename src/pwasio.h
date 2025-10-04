@@ -1,7 +1,7 @@
-#ifndef __WINEASIO_WINEASIO_H__
-#define __WINEASIO_WINEASIO_H__
+#ifndef __PWASIO_PWASIO_H__
+#define __PWASIO_PWASIO_H__
 
-#include <windows.h>
+#include <unknwn.h>
 
 static GUID const class_id = {
     0x9d9612bc,
@@ -10,7 +10,6 @@ static GUID const class_id = {
     {0xaa, 0x6f, 0x59, 0xf6, 0xac, 0xa4, 0xfe, 0x74},
 };
 
-bool pwasio_init();
-void *pwasio_create();
+HRESULT WINAPI CreateInstance(LPCLASSFACTORY, LPUNKNOWN, REFIID, LPVOID *);
 
-#endif // !__WINEASIO_WINEASIO_H__
+#endif // !__PWASIO_PWASIO_H__

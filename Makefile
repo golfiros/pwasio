@@ -3,7 +3,7 @@ DRIVER_REG := Software\\ASIO\\pwasio
 
 VERSION_MAJOR := 0
 VERSION_MINOR := 0
-VERSION_PATCH := 1
+VERSION_PATCH := 2
 
 DIR_LIB := lib
 DIR_BLD := .build
@@ -14,7 +14,7 @@ DIR_GUARD = mkdir -p $(@D)
 CC := clang
 LIBS := -lodbc32 -lole32 -luuid -lwinmm -lshlwapi
 PKG_CONFIG := libpipewire-0.3
-CFLAGS := -fPIC -Wextra -Wall -fno-strict-aliasing -std=gnu23
+CFLAGS := -fPIC -Wextra -Wall -Wno-missing-field-initializers -std=gnu23
 DEFNS := -D_REENTRANT -DLIB_NAME='"$(LIB_NAME)"' -DDRIVER_REG='"$(DRIVER_REG)"'
 DEFNS += -DPWASIO_VERSION_MAJOR=$(VERSION_MAJOR)
 DEFNS += -DPWASIO_VERSION_MINOR=$(VERSION_MINOR)

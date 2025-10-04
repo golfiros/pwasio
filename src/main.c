@@ -31,53 +31,37 @@ WINE_DEFAULT_DEBUG_CHANNEL(asio);
 
 static LONG ref = 0;
 
-static HRESULT WINAPI query_interface(LPCLASSFACTORY, REFIID, LPVOID *ptr) {
+static HRESULT WINAPI QueryInterface(LPCLASSFACTORY, REFIID, LPVOID *ptr) {
   return ptr ? E_NOINTERFACE : E_POINTER;
 }
-static ULONG WINAPI add_ref(LPCLASSFACTORY) {
+static ULONG WINAPI AddRef(LPCLASSFACTORY) {
   return InterlockedIncrement(&ref);
 }
-static ULONG WINAPI release(LPCLASSFACTORY) {
+static ULONG WINAPI Release(LPCLASSFACTORY) {
+  TRACE("\n");
   return InterlockedDecrement(&ref);
 }
-static HRESULT WINAPI create_instance(LPCLASSFACTORY, LPUNKNOWN outer, REFIID,
-                                      LPVOID *ptr) {
-  if (outer)
-    return CLASS_E_NOAGGREGATION;
-
-  if (!ptr)
-    return E_INVALIDARG;
-
-  return (*ptr = pwasio_create()) ? S_OK : E_OUTOFMEMORY;
-}
-static HRESULT WINAPI lock_server(LPCLASSFACTORY, BOOL) { return S_OK; }
+static HRESULT WINAPI LockServer(LPCLASSFACTORY, BOOL) { return S_OK; }
 static struct IClassFactoryVtbl *factory = &(struct IClassFactoryVtbl){
-    .QueryInterface = query_interface,
-    .AddRef = add_ref,
-    .Release = release,
+    .QueryInterface = QueryInterface,
+    .AddRef = AddRef,
+    .Release = Release,
 
-    .CreateInstance = create_instance,
-    .LockServer = lock_server,
+    .CreateInstance = CreateInstance,
+    .LockServer = LockServer,
 };
 
-HRESULT WINAPI DllGetClassObject(REFCLSID rclsid, REFIID riid, LPVOID *ptr) {
-  TRACE("Initializing pwasio\n");
-  if (ptr == NULL)
+HRESULT WINAPI DllGetClassObject(REFCLSID rclsid, REFIID riid, LPVOID *ppvObj) {
+  TRACE("\n");
+  if (ppvObj == NULL || !IsEqualIID(riid, &IID_IClassFactory))
     return E_INVALIDARG;
-
-  *ptr = NULL;
-
-  if (!IsEqualIID(riid, &IID_IClassFactory) && !IsEqualIID(riid, &IID_IUnknown))
-    return E_NOINTERFACE;
-
   if (!IsEqualGUID(rclsid, &class_id))
     return CLASS_E_CLASSNOTAVAILABLE;
 
-  if (!ref && !pwasio_init())
-    return HRESULT_FROM_WIN32(ERROR_SERVICE_DOES_NOT_EXIST);
+  *ppvObj = NULL;
 
   InterlockedIncrement(&ref);
-  *ptr = &factory;
+  *ppvObj = &factory;
   return S_OK;
 }
 

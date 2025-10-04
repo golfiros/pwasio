@@ -1,5 +1,5 @@
-#ifndef __WINEASIO_ASIO_H__
-#define __WINEASIO_ASIO_H__
+#ifndef __PWASIO_ASIO_H__
+#define __PWASIO_ASIO_H__
 
 #include <unknwn.h>
 
@@ -83,16 +83,17 @@ enum asio_message {
 };
 
 struct asio_callbacks {
-  VOID(CALLBACK *swap_buffers)(LONG32, LONG32);
-  VOID(CALLBACK *sample_rate_change)(DOUBLE);
-  LONG32(CALLBACK *message)(LONG32, LONG32, PVOID, DOUBLE *);
+  VOID(CALLBACK *swap_buffers)(LONG32 idx, LONG32 direct);
+  VOID(CALLBACK *sample_rate_change)(DOUBLE rate);
+  LONG32(CALLBACK *message)(LONG32 sel, LONG32 val, PVOID msg, DOUBLE *opt);
   struct asio_time *(CALLBACK *swap_buffers_time_info)(struct asio_time *time,
-                                                       LONG32, LONG32);
+                                                       LONG32 idx,
+                                                       LONG32 direct);
 };
 
 struct asio_buffer_info {
-  LONG32 input;
-  LONG32 channel;
+  const LONG32 input;
+  const LONG32 channel;
   PVOID buf[2];
 };
 
@@ -169,4 +170,4 @@ DECLARE_INTERFACE_(INTERFACE, ) {
 };
 #undef INTERFACE
 
-#endif // !__WINEASIO_ASIO_H__
+#endif // !__PWASIO_ASIO_H__

@@ -2,6 +2,7 @@
 
 pwasio provides an ASIO to PipeWire for Wine. ASIO is the most common Windows
 low-latency audio driver, so is commonly used in audio workstation programs.
+Requires at least PipeWire 1.5.0 for shared audio buffers.
 
 ### Building
 
@@ -13,10 +14,16 @@ make
 
 ### Installing
 
-To install 64bit (substitute with the path to the libs for your wine install)
+To install
 ```sh
-cp lib/wine/x86_64-windows/pwasio.dll /usr/lib/wine/x86_64-windows/
-cp lib/wine/x86_64-unix/pwasio.dll.so /usr/lib/wine/x86_64-unix/
+cp lib/wine/x86_64-windows/pwasio.dll /path/to/winelibs/x86_64-windows/
+cp lib/wine/x86_64-unix/pwasio.dll.so /path/to/winelibs/x86_64-unix/
+```
+
+At the time of writing, the DLLs included in a new Proton prefix are fixed at
+build time, so if using Proton you must also copy the DLL to the default prefix
+```sh
+cp lib/wine/x86_64-windows/pwasio.dll /path/to/proton/files/share/default_pfx/drive_c/windows/system32
 ```
 
 After installation, if using an existing Wine prefix you'll also need to copy
@@ -25,11 +32,8 @@ the dummy DLL to the prefix path
 cp lib/wine/x86_64-windows/pwasio.dll /path/to/prefix/drive_c/windows/system32
 ```
 
-If using Proton, the latter needs to be done regardless of whether the prefix
-was created before or after library installation, since at the time of writing
-the libraries included by Proton are fixed at build time. Finally, the driver
-needs to be registered so it's visible to ASIO enabled applications via
-
+Finally, the driver needs to be registered so it's visible to ASIO enabled
+applications via
 ``` sh
 WINEPREFIX=/path/to/prefix regsvr32 pwasio.dll
 ```
@@ -39,21 +43,22 @@ WINEPREFIX=/path/to/prefix regsvr32 pwasio.dll
 This project comes solely out of frustration of being unable to run Ableton Live
 in my current PipeWire/Proton based Arch Linux setup. This project would not at
 all be possible without the skeleton laid out in the original WineASIO project,
-stability and user-friendliness it is merely a shadow of what that's capable of.
-It works, but that's literally it. Despite being a complete refactor, I consider
-pwasio a derivative work of WineASIO and as such all original authors from that
-have been kept here.
+Despite being a complete refactor, I consider pwasio a derivative work of
+WineASIO and as such all original authors from that have been kept here.
 
 In terms of features, stability and user-friendliness pwasio is merely a shadow
-of what WineASIO currently is. Care has also been taken so that this does not
-conflict with a WineASIO installation so that users may try out both and figure
-out what suits them better. Currently all configuration happens during
-compilation time. There are frequent xruns. The program crashes PipeWire
-semi-often if things are connected in the wrong order (whatever that means for
-you). Development goals include addressing all of the above.
+of what WineASIO currently is. It works, but that's literally it. Care has also
+been taken so that this does not conflict with a WineASIO installation so that
+users may try out both and figure out what suits them better. Currently all
+configuration happens during compilation time. There are frequent xruns. The
+program crashes PipeWire semi-often if things are connected in the wrong order
+(whatever that means for you). Development goals include addressing all of the
+above.
 
 ### Change Log
 
+#### 0.0.2
+* 21/09/2025: PipeWire now directly uses the ASIO buffers (GG)
 #### 0.0.1
 * 01/09/2025: Initial version (GG)
 
