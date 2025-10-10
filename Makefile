@@ -3,7 +3,7 @@ DRIVER_REG := Software\\ASIO\\pwasio
 
 VERSION_MAJOR := 0
 VERSION_MINOR := 0
-VERSION_PATCH := 2
+VERSION_PATCH := 1
 
 DIR_LIB := lib
 DIR_BLD := .build
