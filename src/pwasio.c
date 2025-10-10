@@ -62,21 +62,19 @@ WINE_DEFAULT_DEBUG_CHANNEL(asio);
 #define ERR(...)
 #endif
 
-#define MAX_NAME_LENGTH 32
+#define MAX_NAME 32
 
 #define MIN_BUFFER_SIZE 32
 #define MAX_BUFFER_SIZE 8192
 #define PREF_BUFFER_SIZE 128
 
-#define DEFAULT_SAMPLE_RATE 48000
+#define SAMPLE_RATE 48000
 
 #define MAX_PORTS 32
 
 struct port {
-  struct pw_buffer *buf[2];
+  bool active;
   size_t offset[2];
-  float *ptr[2];
-  bool ready[2];
 };
 
 struct pwasio {
@@ -84,24 +82,29 @@ struct pwasio {
   LONG32 ref;
   char err_msg[256];
 
-  char name[MAX_NAME_LENGTH];
+  char name[MAX_NAME];
   size_t n_inputs, n_outputs;
 
   size_t buffer_size;
   float sample_rate;
 
   struct pw_data_loop *loop;
-  struct pw_filter *filter;
+  struct pw_stream *input, *output;
+  struct pw_buffer *input_buf[2], *output_buf[2];
+  struct port inputs[MAX_PORTS / 2], outputs[MAX_PORTS / 2];
+  size_t idx;
 
   int fd;
-  struct port *ports[MAX_PORTS];
+  size_t fsize;
+  float *buffer;
 
   bool running;
-  bool idx;
 
   struct asio_callbacks *callbacks;
   struct asio_samples pos;
   struct asio_timestamp nsec;
+
+  bool move;
 };
 
 STDMETHODIMP QueryInterface(struct asio *_data, REFIID riid, PVOID *out) {
@@ -132,8 +135,10 @@ STDMETHODIMP_(ULONG32) Release(struct asio *_data) {
     pwasio->vtbl->Stop(_data);
   if (pwasio->fd > 0)
     pwasio->vtbl->DisposeBuffers(_data);
-  if (pwasio->filter)
-    pw_filter_destroy(pwasio->filter);
+  if (pwasio->output)
+    pw_stream_destroy(pwasio->output);
+  if (pwasio->input)
+    pw_stream_destroy(pwasio->input);
   if (pwasio->loop)
     pw_data_loop_destroy(pwasio->loop);
   pw_deinit();
@@ -142,51 +147,11 @@ STDMETHODIMP_(ULONG32) Release(struct asio *_data) {
 
   return 0;
 }
-static void _add_buffer(void *_data, void *_port, struct pw_buffer *buf) {
-  struct pwasio *pwasio = _data;
-  struct port *port = _port;
-
-  TRACE("\n");
-
-  if (!(buf->buffer->datas->type & (1 << SPA_DATA_MemFd))) {
-    pw_log_error("unsupported data type %08x", buf->buffer->datas->type);
-    return;
-  }
-
-  size_t idx = port->buf[pwasio->idx] ? !pwasio->idx : pwasio->idx;
-
-  *buf->buffer->datas = (typeof(*buf->buffer->datas)){
-      .type = SPA_DATA_MemFd,
-      .flags = SPA_DATA_FLAG_READWRITE | SPA_DATA_FLAG_MAPPABLE,
-      .fd = pwasio->fd,
-      .mapoffset = port->offset[idx],
-      .maxsize = sizeof(float) * pwasio->buffer_size,
-      .data = port->ptr[idx],
-      .chunk = buf->buffer->datas->chunk,
-  };
-  port->buf[idx] = buf;
-}
-static void _rem_buffer(void *_data, void *_port, struct pw_buffer *buf) {
-  struct pwasio *pwasio = _data;
-  struct port *port = _port;
-  TRACE("\n");
-  if (buf == port->buf[0]) {
-    for (size_t i = 0; i < pwasio->buffer_size; i++)
-      port->ptr[0][i] = 0.0f;
-    port->buf[0] = nullptr;
-  }
-  if (buf == port->buf[1]) {
-    for (size_t i = 0; i < pwasio->buffer_size; i++)
-      port->ptr[1][i] = 0.0f;
-    port->buf[1] = nullptr;
-  }
-}
 /* Paranoid driver developers should assume that the application will access
  * buffer 0 as soon as bufferSwitch(0) is called, up until bufferSwitch(1)
  * returns (and vice-versa). */
 struct _swap_buffers_args {
-  size_t idx;
-  struct spa_io_position pos;
+  size_t nsec, smp;
 };
 static int _swap_buffers(struct spa_loop *, bool, uint32_t, const void *_arg,
                          size_t, void *_data) {
@@ -194,78 +159,139 @@ static int _swap_buffers(struct spa_loop *, bool, uint32_t, const void *_arg,
   const struct _swap_buffers_args *args = _arg;
 
   pwasio->nsec = (typeof(pwasio->nsec)){
-      .lo = args->pos.clock.nsec,
-      .hi = args->pos.clock.nsec >> 32,
+      .lo = args->nsec,
+      .hi = args->nsec >> 32,
   };
-  if (pwasio->pos.lo > (ULONG32)(-1) - args->pos.clock.duration)
+  if (pwasio->pos.lo > (ULONG32)(-1) - args->smp)
     pwasio->pos.hi++;
-  pwasio->pos.lo += args->pos.clock.duration;
+  pwasio->pos.lo += args->smp;
 
-  pwasio->callbacks->swap_buffers(args->idx, true);
+  pwasio->callbacks->swap_buffers(pwasio->idx, true);
 
-  for (size_t i = 0; i < MAX_PORTS; i++)
-    if (pwasio->ports[i])
-      pwasio->ports[i]->ready[!args->idx] = true;
+  pwasio->idx = !pwasio->idx;
+
+  pw_stream_trigger_process(pwasio->output);
 
   return 0;
 }
-static void _process(void *_data, struct spa_io_position *pos) {
+static void _input_process(void *_data) {
   struct pwasio *pwasio = _data;
+  struct pw_time time;
+  struct pw_buffer *buf;
+  if ((buf = pw_stream_dequeue_buffer(pwasio->input)))
+    pw_stream_queue_buffer(pwasio->input, buf);
 
-  for (size_t i = 0; i < MAX_PORTS; i++)
-    if (pwasio->ports[i])
-      pw_filter_dequeue_buffer(pwasio->ports[i]);
-
+  pw_stream_get_time_n(pwasio->input, &time, sizeof time);
   pw_data_loop_invoke(pwasio->loop, _swap_buffers, SPA_ID_INVALID,
                       &(struct _swap_buffers_args){
-                          .idx = pwasio->idx,
-                          .pos = *pos,
+                          .nsec = time.now,
+                          .smp = time.size,
                       },
                       sizeof(struct _swap_buffers_args), false, pwasio);
-  pwasio->idx = !pwasio->idx;
-
-  struct pw_buffer *buf;
-  for (size_t i = 0; i < MAX_PORTS; i++)
-    if (pwasio->ports[i] && pwasio->ports[i]->ready[pwasio->idx] &&
-        (buf = pwasio->ports[i]->buf[pwasio->idx])) {
-      if (i >= pwasio->n_inputs) {
-        buf->buffer->datas->chunk->offset = 0;
-        buf->buffer->datas->chunk->size = pwasio->buffer_size * sizeof(float);
-        buf->buffer->datas->chunk->stride = sizeof(float);
-        buf->buffer->datas->chunk->flags = 0;
-      }
-      pwasio->ports[i]->ready[pwasio->idx] = false;
-      pw_filter_queue_buffer(pwasio->ports[i], buf);
-    }
 }
-static void _drained(void *) { TRACE("\n"); }
+static void _input_add_buffer(void *_data, struct pw_buffer *buf) {
+  TRACE("\n");
+  struct pwasio *pwasio = _data;
+  size_t idx = !!pwasio->input_buf[0];
+  pwasio->input_buf[idx] = buf;
+  for (size_t i = 0; i < pwasio->n_inputs; i++)
+    buf->buffer->datas[i] = (typeof(buf->buffer->datas[i])){
+        .type = SPA_DATA_MemFd,
+        .fd = pwasio->fd,
+        .mapoffset = pwasio->inputs[i].offset[idx] * sizeof(float),
+        .maxsize = pwasio->buffer_size * sizeof(float),
+        .data = pwasio->buffer + pwasio->inputs[i].offset[idx],
+        .chunk = buf->buffer->datas[i].chunk,
+    };
+};
+static void _input_rem_buffer(void *_data, struct pw_buffer *buf) {
+  struct pwasio *pwasio = _data;
+  if (buf == pwasio->input_buf[0])
+    pwasio->input_buf[0] = nullptr;
+  if (buf == pwasio->input_buf[1])
+    pwasio->input_buf[1] = nullptr;
+}
+static void _output_process(void *_data) {
+  struct pwasio *pwasio = _data;
+  struct pw_buffer *buf;
+  if ((buf = pw_stream_dequeue_buffer(pwasio->output))) {
+    for (size_t i = 0; i < pwasio->n_outputs; i++) {
+      buf->buffer->datas[i].chunk->offset = 0;
+      buf->buffer->datas[i].chunk->size = pwasio->buffer_size * sizeof(float);
+      buf->buffer->datas[i].chunk->stride = sizeof(float);
+      buf->buffer->datas[i].chunk->flags = 0;
+    }
+    pw_stream_queue_buffer(pwasio->output, buf);
+  }
+}
+static void _output_add_buffer(void *_data, struct pw_buffer *buf) {
+  TRACE("\n");
+  struct pwasio *pwasio = _data;
+  size_t idx = !!pwasio->output_buf[0];
+  pwasio->output_buf[idx] = buf;
+  for (size_t i = 0; i < pwasio->n_outputs; i++)
+    buf->buffer->datas[i] = (typeof(buf->buffer->datas[i])){
+        .type = SPA_DATA_MemFd,
+        .fd = pwasio->fd,
+        .mapoffset = pwasio->outputs[i].offset[idx] * sizeof(float),
+        .maxsize = pwasio->buffer_size * sizeof(float),
+        .data = pwasio->buffer + pwasio->outputs[i].offset[idx],
+        .chunk = buf->buffer->datas[i].chunk,
+    };
+};
+static void _output_rem_buffer(void *_data, struct pw_buffer *buf) {
+  struct pwasio *pwasio = _data;
+  if (buf == pwasio->output_buf[0])
+    pwasio->output_buf[0] = nullptr;
+  if (buf == pwasio->output_buf[1])
+    pwasio->output_buf[1] = nullptr;
+}
 STDMETHODIMP_(LONG32) Init(struct asio *_data, void *) {
   struct pwasio *pwasio = (struct pwasio *)_data;
 
   WCHAR path[MAX_PATH];
   GetModuleFileNameW(0, path, MAX_PATH);
   WideCharToMultiByte(CP_ACP, WC_SEPCHARS, StrRChrW(path, NULL, '\\') + 1, -1,
-                      pwasio->name, MAX_NAME_LENGTH, NULL, NULL);
+                      pwasio->name, sizeof pwasio->name, NULL, NULL);
 
   pwasio->n_inputs = 2;
   pwasio->n_outputs = 2;
 
-  char rate_str[32];
+  char rate_str[8];
   sprintf(rate_str, "%lu", (size_t)pwasio->sample_rate);
-  static const struct pw_filter_events filter_events = {
-      PW_VERSION_FILTER_EVENTS,     .add_buffer = _add_buffer,
-      .remove_buffer = _rem_buffer, .process = _process,
-      .drained = _drained,
+  static const struct pw_stream_events input_events = {
+      PW_VERSION_STREAM_EVENTS,
+      .add_buffer = _input_add_buffer,
+      .remove_buffer = _input_rem_buffer,
+      .process = _input_process,
   };
-
-  if (!(pwasio->filter = pw_filter_new_simple(
+  if (!(pwasio->input = pw_stream_new_simple(
             pw_data_loop_get_loop(pwasio->loop), pwasio->name,
             pw_properties_new(PW_KEY_MEDIA_TYPE, "Audio", PW_KEY_MEDIA_CATEGORY,
-                              "Filter", PW_KEY_MEDIA_ROLE, "DSP",
+                              "Capture", PW_KEY_MEDIA_ROLE, "Music",
                               PW_KEY_NODE_ALWAYS_PROCESS, "true",
                               PW_KEY_NODE_FORCE_RATE, rate_str, nullptr),
-            &filter_events, pwasio))) {
-    sprintf(pwasio->err_msg, "Failed to create PipeWire filter\n");
+            &input_events, pwasio))) {
+    sprintf(pwasio->err_msg, "Failed to create input stream\n");
+    return ASIO_ERROR_NO_MEMORY;
+  }
+
+  static const struct pw_stream_events output_events = {
+      PW_VERSION_STREAM_EVENTS,
+      .add_buffer = _output_add_buffer,
+      .remove_buffer = _output_rem_buffer,
+      .process = _output_process,
+  };
+  if (!(pwasio->output = pw_stream_new_simple(
+            pw_data_loop_get_loop(pwasio->loop), pwasio->name,
+            pw_properties_new(PW_KEY_MEDIA_TYPE, "Audio", PW_KEY_MEDIA_CATEGORY,
+                              "Playback", PW_KEY_MEDIA_ROLE, "Music",
+                              PW_KEY_NODE_ALWAYS_PROCESS, "true",
+                              PW_KEY_NODE_FORCE_RATE, rate_str, nullptr),
+            &output_events, pwasio))) {
+    pw_stream_destroy(pwasio->input);
+    pwasio->input = nullptr;
+    sprintf(pwasio->err_msg, "Failed to create output stream\n");
     return ASIO_ERROR_NO_MEMORY;
   }
 
@@ -280,6 +306,7 @@ STDMETHODIMP_(LONG32) GetDriverVersion(struct asio *) {
   return (PWASIO_VERSION_MAJOR << 20) + (PWASIO_VERSION_MINOR << 10) +
          (PWASIO_VERSION_PATCH);
 }
+
 STDMETHODIMP_(VOID) GetErrorMessage(struct asio *_data, PSTR string) {
   struct pwasio *pwasio = (struct pwasio *)_data;
   if (*pwasio->err_msg) {
@@ -288,8 +315,10 @@ STDMETHODIMP_(VOID) GetErrorMessage(struct asio *_data, PSTR string) {
   } else
     strcpy(string, "Undocumented error\n");
 }
+
 STDMETHODIMP_(LONG32) Start(struct asio *_data) {
   struct pwasio *pwasio = (struct pwasio *)_data;
+  TRACE("start\n");
 
   if (pwasio->fd < 0) {
     sprintf(pwasio->err_msg, "Tried to start loop without buffers\n");
@@ -302,6 +331,7 @@ STDMETHODIMP_(LONG32) Start(struct asio *_data) {
   pwasio->running = true;
   return ASIO_ERROR_OK;
 }
+
 STDMETHODIMP_(LONG32) Stop(struct asio *_data) {
   struct pwasio *pwasio = (struct pwasio *)_data;
   if (!pwasio->running) {
@@ -312,6 +342,7 @@ STDMETHODIMP_(LONG32) Stop(struct asio *_data) {
   pw_data_loop_stop(pwasio->loop);
   return ASIO_ERROR_OK;
 }
+
 STDMETHODIMP_(LONG32)
 GetChannels(struct asio *_data, LONG *n_inputs, LONG *n_outputs) {
   struct pwasio *pwasio = (struct pwasio *)_data;
@@ -329,8 +360,8 @@ STDMETHODIMP_(LONG) GetLatencies(struct asio *_data, LONG *in, LONG *out) {
   if (!in || !out)
     return ASIO_ERROR_INVALID_PARAMETER;
 
-  if (!pwasio->filter) {
-    sprintf(pwasio->err_msg, "Tried to get latencies without filter\n");
+  if (!pwasio->input) {
+    sprintf(pwasio->err_msg, "Tried to get latencies when not running\n");
     return ASIO_ERROR_NOT_PRESENT;
   }
 
@@ -368,20 +399,12 @@ STDMETHODIMP_(LONG32) GetSampleRate(struct asio *_data, DOUBLE *rate) {
 }
 STDMETHODIMP_(LONG32) SetSampleRate(struct asio *_data, DOUBLE rate) {
   struct pwasio *pwasio = (struct pwasio *)_data;
-  if (!pwasio->filter) {
+  if (!pwasio->input || !pwasio->output) {
     sprintf(pwasio->err_msg,
-            "Tried to set sample rate before creating filter\n");
+            "Tried to set sample rate before creating streams\n");
     return ASIO_ERROR_NOT_PRESENT;
   }
   TRACE("Setting sample rate to %f\n", rate);
-  char rate_str[32];
-  sprintf(rate_str, "%lu", (size_t)pwasio->sample_rate);
-  if (pw_filter_update_properties(pwasio->filter, nullptr,
-                                  &SPA_DICT_ITEMS(SPA_DICT_ITEM(
-                                      PW_KEY_NODE_FORCE_RATE, rate_str))) < 0) {
-    sprintf(pwasio->err_msg, "Failed to set sample rate to %s\n", rate_str);
-    return ASIO_ERROR_HW_MALFUNCTION;
-  }
   pwasio->sample_rate = rate;
   return ASIO_ERROR_OK;
 }
@@ -425,19 +448,23 @@ STDMETHODIMP_(LONG32)
 GetChannelInfo(struct asio *_data, struct asio_channel_info *info) {
   struct pwasio *pwasio = (struct pwasio *)_data;
 
-  if (info->index < 0 ||
-      (info->input ? info->index >= (LONG32)pwasio->n_inputs
-                   : info->index >= (LONG32)pwasio->n_outputs))
+  if (info->index < 0)
     return ASIO_ERROR_INVALID_PARAMETER;
 
-  info->active = !!pwasio->ports[info->input * pwasio->n_inputs + info->index];
+  if (info->input) {
+    if (info->index >= (LONG32)pwasio->n_inputs)
+      return ASIO_ERROR_INVALID_PARAMETER;
+    info->active = pwasio->inputs[info->index].active;
+    sprintf(info->name, "in_%d", info->index);
+  } else {
+    if (info->index >= (LONG32)pwasio->n_outputs)
+      return ASIO_ERROR_INVALID_PARAMETER;
+    info->active = pwasio->outputs[info->index].active;
+    sprintf(info->name, "out_%d", info->index);
+  }
+
   info->group = 0;
   info->type = ASIO_SAMPLE_TYPE_FLOAT32_LSB;
-
-  if (info->input)
-    sprintf(info->name, "in_%d", info->index);
-  else
-    sprintf(info->name, "out_%d", info->index);
 
   return ASIO_ERROR_OK;
 }
@@ -448,13 +475,13 @@ CreateBuffers(struct asio *_data, struct asio_buffer_info *channels,
               struct asio_callbacks *callbacks) {
   struct pwasio *pwasio = (struct pwasio *)_data;
 
-  if (!pwasio->filter) {
-    sprintf(pwasio->err_msg, "Tried to create buffers without filter\n");
+  if (!pwasio->input || !pwasio->output) {
+    sprintf(pwasio->err_msg, "Tried to create buffers without streams\n");
     return ASIO_ERROR_NOT_PRESENT;
   }
 
   if (!channels || !callbacks)
-    return ASIO_ERROR_INVALID_MODE;
+    return ASIO_ERROR_INVALID_PARAMETER;
 
   if (buffer_size > MAX_BUFFER_SIZE || buffer_size < MIN_BUFFER_SIZE ||
       (buffer_size & (buffer_size - 1))) {
@@ -466,10 +493,12 @@ CreateBuffers(struct asio *_data, struct asio_buffer_info *channels,
 
   char bufsize_str[32];
   sprintf(bufsize_str, "%u", buffer_size);
-  if (pw_filter_update_properties(
-          pwasio->filter, nullptr,
-          &SPA_DICT_ITEMS(
-              SPA_DICT_ITEM(PW_KEY_NODE_FORCE_QUANTUM, bufsize_str))) < 0) {
+  if (pw_stream_update_properties(
+          pwasio->input, &SPA_DICT_ITEMS(SPA_DICT_ITEM(
+                             PW_KEY_NODE_FORCE_QUANTUM, bufsize_str))) < 0 ||
+      (pw_stream_update_properties(
+           pwasio->output, &SPA_DICT_ITEMS(SPA_DICT_ITEM(
+                               PW_KEY_NODE_FORCE_QUANTUM, bufsize_str))) < 0)) {
     sprintf(pwasio->err_msg, "Failed to set sample rate to %s\n", bufsize_str);
     return ASIO_ERROR_HW_MALFUNCTION;
   }
@@ -477,95 +506,115 @@ CreateBuffers(struct asio *_data, struct asio_buffer_info *channels,
   pwasio->buffer_size = buffer_size;
   pwasio->callbacks = callbacks;
 
-  size_t offset =
-      SPA_MAX(pwasio->buffer_size * sizeof(float), (size_t)getpagesize());
+  size_t offset = SPA_MAX(pwasio->buffer_size * sizeof *pwasio->buffer,
+                          (size_t)getpagesize()) /
+                  sizeof(float);
+  pwasio->fsize = 2 * MAX_PORTS * offset * sizeof *pwasio->buffer;
+
   if ((pwasio->fd = memfd_create("pwasio-buf", MFD_CLOEXEC)) < 0) {
     sprintf(pwasio->err_msg, "Failed to create buffer file descriptor\n");
     goto cleanup;
   }
-  if (ftruncate(pwasio->fd, 2 * MAX_PORTS * offset) < 0) {
-    sprintf(pwasio->err_msg, "Failed to truncate buffer file descriptor\n");
+  if (ftruncate(pwasio->fd, pwasio->fsize) < 0) {
+    sprintf(pwasio->err_msg, "Failed to truncate buffer file\n");
     goto cleanup;
   }
+  if ((pwasio->buffer = mmap(nullptr, pwasio->fsize, PROT_READ | PROT_WRITE,
+                             MAP_SHARED, pwasio->fd, 0)) == MAP_FAILED) {
+    sprintf(pwasio->err_msg, "Failed to mmap buffer\n");
+    goto cleanup;
+  }
+  for (size_t i = 0; i < MAX_PORTS / 2; i++)
+    for (size_t b = 0; b < 2; b++) {
+      pwasio->inputs[i].offset[b] = (2 * i + b) * offset;
+      pwasio->outputs[i].offset[b] = (2 * (i + pwasio->n_inputs) + b) * offset;
+    }
 
-  struct spa_pod_builder b = {};
-  char buf[1024];
-  spa_pod_builder_init(&b, buf, sizeof buf);
-  const struct spa_pod *params[] = {
-      spa_pod_builder_add_object(
-          &b, SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat,
-          SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_audio),
-          SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_dsp),
-          SPA_FORMAT_AUDIO_format, SPA_POD_Id(SPA_AUDIO_FORMAT_DSP_F32)),
-      spa_pod_builder_add_object(
-          &b, SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers,
-          SPA_PARAM_BUFFERS_buffers, SPA_POD_Int(2), SPA_PARAM_BUFFERS_blocks,
-          SPA_POD_Int(1), SPA_PARAM_BUFFERS_size,
-          SPA_POD_Int(buffer_size * sizeof(float)), SPA_PARAM_BUFFERS_stride,
-          SPA_POD_Int(sizeof(float))),
-  };
-
-  for (size_t channel = 0; channel < (size_t)n_channels; channel++) {
-    struct asio_buffer_info *buffer_info = channels + channel;
-    char name[16];
-    if (buffer_info->input && buffer_info->channel < (LONG32)pwasio->n_inputs)
-      sprintf(name, "in_%d", buffer_info->channel);
-    else if (!buffer_info->input &&
-             buffer_info->channel < (LONG32)pwasio->n_outputs)
-      sprintf(name, "out_%d", buffer_info->channel);
+  for (size_t c = 0; c < (size_t)n_channels; c++) {
+    struct asio_buffer_info *info = channels + c;
+    struct port *p;
+    if (info->input && info->channel < (LONG32)pwasio->n_inputs)
+      p = pwasio->inputs + info->channel;
+    else if (!info->input && info->channel < (LONG32)pwasio->n_outputs)
+      p = pwasio->outputs + info->channel;
     else {
       sprintf(pwasio->err_msg, "Invalid channel requested\n");
       goto cleanup;
     }
+    p->active = true;
+    for (size_t b = 0; b < 2; b++)
+      info->buf[b] = pwasio->buffer + p->offset[b];
+  }
 
-    size_t i = !buffer_info->input * pwasio->n_inputs + buffer_info->channel;
-    if (!(pwasio->ports[i] = pw_filter_add_port(
-              pwasio->filter,
-              buffer_info->input ? PW_DIRECTION_INPUT : PW_DIRECTION_OUTPUT,
-              PW_FILTER_PORT_FLAG_ALLOC_BUFFERS, sizeof *pwasio->ports[i],
-              pw_properties_new(PW_KEY_PORT_NAME, name, nullptr), params,
-              SPA_N_ELEMENTS(params)))) {
-      sprintf(pwasio->err_msg, "Filter port creation failed\n");
+  char buf[1024];
+  {
+    struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buf, sizeof buf);
+    const struct spa_pod *params[] = {
+        spa_pod_builder_add_object(
+            &b, SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat,
+            SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_audio),
+            SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
+            SPA_FORMAT_AUDIO_format, SPA_POD_Id(SPA_AUDIO_FORMAT_DSP_F32),
+            SPA_FORMAT_AUDIO_rate, SPA_POD_Int((size_t)pwasio->sample_rate),
+            SPA_FORMAT_AUDIO_channels, SPA_POD_Int(pwasio->n_inputs)),
+        spa_pod_builder_add_object(
+            &b, SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers,
+            SPA_PARAM_BUFFERS_buffers, SPA_POD_Int(2), SPA_PARAM_BUFFERS_size,
+            SPA_POD_Int(buffer_size * sizeof(float)), SPA_PARAM_BUFFERS_stride,
+            SPA_POD_Int(sizeof(float)), SPA_PARAM_BUFFERS_align,
+            SPA_POD_Int(offset * sizeof(float))),
+    };
+    if (pw_stream_connect(pwasio->input, PW_DIRECTION_INPUT, PW_ID_ANY,
+                          PW_STREAM_FLAG_ALLOC_BUFFERS |
+                              PW_STREAM_FLAG_RT_PROCESS,
+                          params, SPA_N_ELEMENTS(params)) < 0) {
+      sprintf(pwasio->err_msg, "Failed to connect input stream\n");
       goto cleanup;
     }
-    pw_filter_update_properties(
-        pwasio->filter, pwasio->ports[i],
-        &SPA_DICT_ITEMS(
-            SPA_DICT_ITEM(PW_KEY_FORMAT_DSP, "32 bit float mono audio")));
-    *pwasio->ports[i] = (typeof(*pwasio->ports[i])){
-        .ptr = {MAP_FAILED, MAP_FAILED},
+  }
+  {
+    struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buf, sizeof buf);
+    const struct spa_pod *params[] = {
+        spa_pod_builder_add_object(
+            &b, SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat,
+            SPA_FORMAT_mediaType, SPA_POD_Id(SPA_MEDIA_TYPE_audio),
+            SPA_FORMAT_mediaSubtype, SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
+            SPA_FORMAT_AUDIO_format, SPA_POD_Id(SPA_AUDIO_FORMAT_DSP_F32),
+            SPA_FORMAT_AUDIO_rate, SPA_POD_Int((size_t)pwasio->sample_rate),
+            SPA_FORMAT_AUDIO_channels, SPA_POD_Int(pwasio->n_outputs)),
+        spa_pod_builder_add_object(
+            &b, SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers,
+            SPA_PARAM_BUFFERS_buffers, SPA_POD_Int(2), SPA_PARAM_BUFFERS_size,
+            SPA_POD_Int(buffer_size * sizeof(float)), SPA_PARAM_BUFFERS_stride,
+            SPA_POD_Int(sizeof(float)), SPA_PARAM_BUFFERS_align,
+            SPA_POD_Int(offset * sizeof(float))),
     };
-    for (size_t b = 0; b < 2; b++) {
-      if ((pwasio->ports[i]->ptr[b] = buffer_info->buf[b] =
-               mmap(nullptr, pwasio->buffer_size * sizeof(float),
-                    PROT_READ | PROT_WRITE, MAP_SHARED, pwasio->fd,
-                    pwasio->ports[i]->offset[b] = (2 * i + b) * offset)) ==
-          MAP_FAILED) {
-        sprintf(pwasio->err_msg, "Failed to mmap buffer\n");
-        goto cleanup;
-      }
-      TRACE("port %lu buffer %lu mapped to %p\n", i, b, buffer_info->buf[b]);
+    if (pw_stream_connect(pwasio->output, PW_DIRECTION_OUTPUT, PW_ID_ANY,
+                          PW_STREAM_FLAG_ALLOC_BUFFERS |
+                              PW_STREAM_FLAG_RT_PROCESS | PW_STREAM_FLAG_DRIVER,
+                          params, SPA_N_ELEMENTS(params)) < 0) {
+      sprintf(pwasio->err_msg, "Failed to connect output stream\n");
+      goto cleanup;
     }
   }
 
-  if (pw_filter_connect(pwasio->filter, PW_FILTER_FLAG_RT_PROCESS, nullptr, 0) <
-      0) {
-    sprintf(pwasio->err_msg, "Failed to connect to PipeWire\n");
-    goto cleanup;
-  }
-
+  TRACE("\n");
   return ASIO_ERROR_OK;
 cleanup:
+  if (pw_stream_get_state(pwasio->output, nullptr) !=
+      PW_STREAM_STATE_UNCONNECTED)
+    pw_stream_disconnect(pwasio->output);
+  if (pw_stream_get_state(pwasio->input, nullptr) !=
+      PW_STREAM_STATE_UNCONNECTED)
+    pw_stream_disconnect(pwasio->input);
+
   for (size_t i = 0; i < MAX_PORTS; i++)
-    if (pwasio->ports[i]) {
-      for (size_t b = 0; b < 2; b++)
-        if (pwasio->ports[i]->ptr[b])
-          munmap(pwasio->ports[i]->ptr[b], pwasio->buffer_size * sizeof(float));
-      pw_filter_remove_port(pwasio->ports[i]);
-      pwasio->ports[i] = nullptr;
-    }
+    pwasio->inputs[i].active = pwasio->outputs[i].active = false;
+  if (pwasio->buffer != MAP_FAILED)
+    munmap(pwasio->buffer, pwasio->fsize);
   if (pwasio->fd > 0)
     close(pwasio->fd);
+
   return ASIO_ERROR_NO_MEMORY;
 }
 STDMETHODIMP_(LONG32) DisposeBuffers(struct asio *_data) {
@@ -575,8 +624,8 @@ STDMETHODIMP_(LONG32) DisposeBuffers(struct asio *_data) {
   if (pwasio->running)
     pwasio->vtbl->Stop(_data);
 
-  if (!pwasio->filter) {
-    sprintf(pwasio->err_msg, "Tried to dispose of buffers without filter\n");
+  if (!pwasio->input || !pwasio->output) {
+    sprintf(pwasio->err_msg, "Tried to dispose of buffers without streams\n");
     return ASIO_ERROR_NOT_PRESENT;
   }
 
@@ -586,18 +635,19 @@ STDMETHODIMP_(LONG32) DisposeBuffers(struct asio *_data) {
     return ASIO_ERROR_NOT_PRESENT;
   }
 
-  pw_filter_disconnect(pwasio->filter);
+  if (pw_stream_get_state(pwasio->output, nullptr) !=
+      PW_STREAM_STATE_UNCONNECTED)
+    pw_stream_disconnect(pwasio->output);
+  if (pw_stream_get_state(pwasio->input, nullptr) !=
+      PW_STREAM_STATE_UNCONNECTED)
+    pw_stream_disconnect(pwasio->input);
 
   for (size_t i = 0; i < MAX_PORTS; i++)
-    if (pwasio->ports[i]) {
-      for (size_t b = 0; b < 2; b++)
-        if (pwasio->ports[i]->ptr[b])
-          munmap(pwasio->ports[i]->ptr[b], pwasio->buffer_size * sizeof(float));
-      pw_filter_remove_port(pwasio->ports[i]);
-      pwasio->ports[i] = nullptr;
-    }
-
-  close(pwasio->fd);
+    pwasio->inputs[i].active = pwasio->outputs[i].active = false;
+  if (pwasio->buffer != MAP_FAILED)
+    munmap(pwasio->buffer, pwasio->fsize);
+  if (pwasio->fd > 0)
+    close(pwasio->fd);
 
   return 0;
 }
@@ -713,8 +763,9 @@ HRESULT WINAPI CreateInstance(LPCLASSFACTORY, LPUNKNOWN outer, REFIID,
   *pwasio = (typeof(*pwasio)){
       .vtbl = &vtbl,
       .ref = 1,
-      .sample_rate = DEFAULT_SAMPLE_RATE,
+      .sample_rate = SAMPLE_RATE,
       .fd = -1,
+      .buffer = MAP_FAILED,
   };
 
   TRACE("Starting pwasio\n");

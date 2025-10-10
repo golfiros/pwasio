@@ -57,6 +57,8 @@ above.
 
 ### Change Log
 
+#### 0.0.3
+* 10/10/2025: Use decoupled input and output streams (GG)
 #### 0.0.2
 * 21/09/2025: PipeWire now directly uses the ASIO buffers (GG)
 #### 0.0.1
