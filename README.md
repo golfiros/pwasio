@@ -2,7 +2,9 @@
 
 pwasio provides an ASIO to PipeWire for Wine. ASIO is the most common Windows
 low-latency audio driver, so is commonly used in audio workstation programs.
-Requires at least PipeWire 1.5.0 for shared audio buffers.
+Requires at least PipeWire 1.5.0 for shared audio buffers, which at the time
+of writing needs to be built from source. Current Steam Runtime (sniper)
+includes PipeWire 0.3.65, so running there will result in linking errors.
 
 ### Building
 
@@ -58,6 +60,7 @@ above.
 ### Change Log
 
 #### 0.0.1
+* 11/10/2025: Add control panel and persistent configuration (GG)
 * 10/10/2025: Use decoupled input and output streams (GG)
 * 21/09/2025: PipeWire now directly uses the ASIO buffers (GG)
 * 01/09/2025: Initial version (GG)

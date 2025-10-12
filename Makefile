@@ -12,7 +12,7 @@ DIR_SRC := src
 DIR_GUARD = mkdir -p $(@D)
 
 CC := clang
-LIBS := -lodbc32 -lole32 -luuid -lwinmm -lshlwapi
+LIBS := -lodbc32 -lole32 -luuid -lwinmm -lshlwapi -lgdi32
 PKG_CONFIG := libpipewire-0.3
 CFLAGS := -fPIC -Wextra -Wall -Wno-missing-field-initializers -std=gnu23
 DEFNS := -D_REENTRANT -DLIB_NAME='"$(LIB_NAME)"' -DDRIVER_REG='"$(DRIVER_REG)"'
@@ -31,9 +31,11 @@ endif
 TARGET := $(DIR_LIB)/wine/x86_64-unix/$(LIB_NAME).so
 HEADERS := $(wildcard $(DIR_SRC)/*.h)
 BINARIES := $(patsubst $(DIR_SRC)/%.c, $(DIR_BLD)/%.o, $(wildcard $(DIR_SRC)/*.c))
+RESOURCES := $(patsubst $(DIR_SRC)/%.rc, $(DIR_BLD)/%.res, $(wildcard $(DIR_SRC)/*.rc))
 
-WINEBUILD = winebuild
-WINECC    = winegcc
+WINEBUILD := winebuild
+WINECC := winegcc
+WINERC := wrc
 WINETARGET := $(DIR_LIB)/wine/x86_64-windows/$(LIB_NAME)
 
 WINDOWSINC := /usr/include/wine/windows
@@ -46,11 +48,15 @@ $(DIR_BLD)/%.o: $(DIR_SRC)/%.c $(HEADERS)
 	$(DIR_GUARD)
 	$(CC) $(DEFNS) $(CFLAGS) $(shell pkg-config --cflags $(PKG_CONFIG)) -I$(WINDOWSINC) -c $< -o $@
 
-$(TARGET): $(BINARIES)
+$(DIR_BLD)/%.res: $(DIR_SRC)/%.rc $(HEADERS)
+	$(DIR_GUARD)
+	$(WINERC) -o $@ $<
+
+$(TARGET): $(BINARIES) $(RESOURCES)
 	$(DIR_GUARD)
 	$(WINECC) $^ -shared -m64 $(LIB_NAME).spec $(shell pkg-config --libs $(PKG_CONFIG)) $(LIBS) -o $@
 
-$(WINETARGET): $(BINARIES)
+$(WINETARGET): $(BINARIES) $(RESOURCES)
 	$(DIR_GUARD)
 	$(WINEBUILD) -m64 --dll --fake-module -E $(LIB_NAME).spec $^ -o $@
 

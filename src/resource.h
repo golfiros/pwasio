@@ -1,0 +1,6 @@
+#define IDD_PANEL 101
+
+#define IDE_INPUTS 1001
+#define IDE_OUTPUTS 1002
+#define IDE_BUFSIZE 1003
+#define IDE_SMPRATE 1004

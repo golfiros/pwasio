@@ -10,6 +10,12 @@ static GUID const class_id = {
     {0xaa, 0x6f, 0x59, 0xf6, 0xac, 0xa4, 0xfe, 0x74},
 };
 
+struct factory {
+  struct IClassFactoryVtbl *vtbl;
+  LONG ref;
+  HINSTANCE hinst;
+};
+
 HRESULT WINAPI CreateInstance(LPCLASSFACTORY, LPUNKNOWN, REFIID, LPVOID *);
 
 #endif // !__PWASIO_PWASIO_H__

@@ -29,27 +29,23 @@ WINE_DEFAULT_DEBUG_CHANNEL(asio);
 #define ERR(...)
 #endif
 
-static LONG ref = 0;
+static HINSTANCE g_hinst;
 
 static HRESULT WINAPI QueryInterface(LPCLASSFACTORY, REFIID, LPVOID *ptr) {
   return ptr ? E_NOINTERFACE : E_POINTER;
 }
-static ULONG WINAPI AddRef(LPCLASSFACTORY) {
-  return InterlockedIncrement(&ref);
+static ULONG WINAPI AddRef(LPCLASSFACTORY _data) {
+  struct factory *factory = (struct factory *)_data;
+  return InterlockedIncrement(&factory->ref);
 }
-static ULONG WINAPI Release(LPCLASSFACTORY) {
-  TRACE("\n");
-  return InterlockedDecrement(&ref);
+static ULONG WINAPI Release(LPCLASSFACTORY _data) {
+  struct factory *factory = (struct factory *)_data;
+  if (InterlockedDecrement(&factory->ref))
+    return factory->ref;
+  HeapFree(GetProcessHeap(), 0, factory);
+  return 0;
 }
 static HRESULT WINAPI LockServer(LPCLASSFACTORY, BOOL) { return S_OK; }
-static struct IClassFactoryVtbl *factory = &(struct IClassFactoryVtbl){
-    .QueryInterface = QueryInterface,
-    .AddRef = AddRef,
-    .Release = Release,
-
-    .CreateInstance = CreateInstance,
-    .LockServer = LockServer,
-};
 
 HRESULT WINAPI DllGetClassObject(REFCLSID rclsid, REFIID riid, LPVOID *ppvObj) {
   TRACE("\n");
@@ -58,16 +54,36 @@ HRESULT WINAPI DllGetClassObject(REFCLSID rclsid, REFIID riid, LPVOID *ppvObj) {
   if (!IsEqualGUID(rclsid, &class_id))
     return CLASS_E_CLASSNOTAVAILABLE;
 
-  *ppvObj = NULL;
+  struct factory *factory;
+  if (!(*ppvObj = factory =
+            HeapAlloc(GetProcessHeap(), 0, sizeof(struct factory))))
+    return E_OUTOFMEMORY;
 
-  InterlockedIncrement(&ref);
-  *ppvObj = &factory;
+  static struct IClassFactoryVtbl vtbl = {
+      .QueryInterface = QueryInterface,
+      .AddRef = AddRef,
+      .Release = Release,
+
+      .CreateInstance = CreateInstance,
+      .LockServer = LockServer,
+  };
+
+  *factory = (typeof(*factory)){
+      .vtbl = &vtbl,
+      .ref = 1,
+      .hinst = g_hinst,
+  };
+
   return S_OK;
 }
 
 HRESULT WINAPI DllCanUnloadNow(void) { return S_FALSE; }
 
-BOOL WINAPI DllMain(HINSTANCE, DWORD, LPVOID) { return TRUE; }
+BOOL WINAPI DllMain(HINSTANCE hinst, DWORD reason, LPVOID) {
+  if (reason == DLL_PROCESS_ATTACH)
+    g_hinst = hinst;
+  return TRUE;
+}
 
 #define REG_STR(str) REG_SZ, (const BYTE *)(str), sizeof(str)
 
@@ -135,6 +151,7 @@ HRESULT WINAPI DllUnregisterServer(void) {
   CHK(RegDeleteTreeW(key, wstr));
 
   CHK(RegDeleteTreeA(HKEY_LOCAL_MACHINE, DRIVER_REG));
+  CHK(RegDeleteTreeA(HKEY_CURRENT_USER, DRIVER_REG));
 
 cleanup:
   if (key)
