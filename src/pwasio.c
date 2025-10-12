@@ -102,6 +102,7 @@ struct pwasio {
   struct thread thread;
   struct pw_data_loop *loop;
   struct pw_stream *input, *output;
+  struct pw_time time;
   struct pw_buffer *input_buf[2], *output_buf[2];
   struct port inputs[MAX_PORTS], outputs[MAX_PORTS];
   size_t idx;
@@ -113,8 +114,6 @@ struct pwasio {
   bool running;
 
   struct asio_callbacks *callbacks;
-  struct asio_samples pos;
-  struct asio_timestamp nsec;
 
   HANDLE panel;
   HWND dialog;
@@ -183,17 +182,11 @@ static int _swap_buffers(struct spa_loop *, bool, uint32_t, const void *,
 static void _input_process(void *_data) {
   struct pwasio *pwasio = _data;
 
+  pw_stream_get_time_n(pwasio->input, &pwasio->time, sizeof pwasio->time);
+
   struct pw_buffer *buf;
-  if ((buf = pw_stream_dequeue_buffer(pwasio->input))) {
-    pwasio->nsec = (typeof(pwasio->nsec)){
-        .lo = buf->time,
-        .hi = buf->time >> 32,
-    };
-    if (pwasio->pos.lo > (ULONG32)(-1) - (ULONG32)pwasio->buffer_size)
-      pwasio->pos.hi++;
-    pwasio->pos.lo += pwasio->buffer_size;
+  if ((buf = pw_stream_dequeue_buffer(pwasio->input)))
     pw_stream_queue_buffer(pwasio->input, buf);
-  }
 
   pw_data_loop_invoke(pwasio->loop, _swap_buffers, SPA_ID_INVALID, nullptr, 0,
                       false, pwasio);
@@ -476,8 +469,14 @@ GetSamplePosition(struct asio *_data, struct asio_samples *pos,
   if (!pwasio->input || !pwasio->output)
     pwasio_err(ASIO_ERROR_NOT_PRESENT, "no IO");
 
-  *pos = pwasio->pos;
-  *nsec = pwasio->nsec;
+  *pos = (typeof(*pos)){
+      .lo = (uint64_t)pwasio->time.ticks,
+      .hi = ((uint64_t)pwasio->time.ticks) >> 32,
+  };
+  *nsec = (typeof(*nsec)){
+      .lo = (uint64_t)pwasio->time.now,
+      .hi = ((uint64_t)pwasio->time.now) >> 32,
+  };
 
   return ASIO_ERROR_OK;
 }
