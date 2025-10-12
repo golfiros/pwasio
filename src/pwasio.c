@@ -32,6 +32,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 #include "resource.h"
 
 #include <pipewire/pipewire.h>
+#include <pthread.h>
 #include <sched.h>
 #include <sys/mman.h>
 
@@ -78,6 +79,15 @@ struct port {
   size_t offset[2];
 };
 
+struct thread {
+  HANDLE handle;
+  DWORD thread_id;
+  pthread_t tid;
+
+  void *(*start)(void *);
+  void *arg, *ret;
+};
+
 struct pwasio {
   const struct asioVtbl *vtbl;
   LONG32 ref;
@@ -88,6 +98,8 @@ struct pwasio {
   char name[MAX_NAME];
   size_t n_inputs, n_outputs, buffer_size, sample_rate;
 
+  struct spa_thread_utils thread_utils;
+  struct thread thread;
   struct pw_data_loop *loop;
   struct pw_stream *input, *output;
   struct pw_buffer *input_buf[2], *output_buf[2];
@@ -159,44 +171,32 @@ STDMETHODIMP_(ULONG32) Release(struct asio *_data) {
 /* Paranoid driver developers should assume that the application will access
  * buffer 0 as soon as bufferSwitch(0) is called, up until bufferSwitch(1)
  * returns (and vice-versa). */
-struct _swap_buffers_args {
-  size_t nsec, smp;
-};
-static int _swap_buffers(struct spa_loop *, bool, uint32_t, const void *_arg,
+static int _swap_buffers(struct spa_loop *, bool, uint32_t, const void *,
                          size_t, void *_data) {
   struct pwasio *pwasio = _data;
-  const struct _swap_buffers_args *args = _arg;
-
-  pwasio->nsec = (typeof(pwasio->nsec)){
-      .lo = args->nsec,
-      .hi = args->nsec >> 32,
-  };
-  if (pwasio->pos.lo > (ULONG32)(-1) - args->smp)
-    pwasio->pos.hi++;
-  pwasio->pos.lo += args->smp;
-
-  pwasio->callbacks->swap_buffers(pwasio->idx, true);
-
+  if (pw_data_loop_in_thread(pwasio->loop))
+    pwasio->callbacks->swap_buffers(pwasio->idx, true);
   pwasio->idx = !pwasio->idx;
-
   pw_stream_trigger_process(pwasio->output);
-
   return 0;
 }
 static void _input_process(void *_data) {
   struct pwasio *pwasio = _data;
-  struct pw_time time;
-  struct pw_buffer *buf;
-  if ((buf = pw_stream_dequeue_buffer(pwasio->input)))
-    pw_stream_queue_buffer(pwasio->input, buf);
 
-  pw_stream_get_time_n(pwasio->input, &time, sizeof time);
-  pw_data_loop_invoke(pwasio->loop, _swap_buffers, SPA_ID_INVALID,
-                      &(struct _swap_buffers_args){
-                          .nsec = time.now,
-                          .smp = time.size,
-                      },
-                      sizeof(struct _swap_buffers_args), true, pwasio);
+  struct pw_buffer *buf;
+  if ((buf = pw_stream_dequeue_buffer(pwasio->input))) {
+    pwasio->nsec = (typeof(pwasio->nsec)){
+        .lo = buf->time,
+        .hi = buf->time >> 32,
+    };
+    if (pwasio->pos.lo > (ULONG32)(-1) - (ULONG32)pwasio->buffer_size)
+      pwasio->pos.hi++;
+    pwasio->pos.lo += pwasio->buffer_size;
+    pw_stream_queue_buffer(pwasio->input, buf);
+  }
+
+  pw_data_loop_invoke(pwasio->loop, _swap_buffers, SPA_ID_INVALID, nullptr, 0,
+                      false, pwasio);
 }
 static void _input_add_buffer(void *_data, struct pw_buffer *buf) {
   struct pwasio *pwasio = _data;
@@ -372,7 +372,8 @@ STDMETHODIMP_(LONG) GetLatencies(struct asio *_data, LONG *in, LONG *out) {
   if (!pwasio->input || !pwasio->output)
     pwasio_err(ASIO_ERROR_NOT_PRESENT, "no IO");
 
-  *in = *out = 0;
+  *in = pwasio->buffer_size;
+  *out = 0;
 
   return ASIO_ERROR_OK;
 }
@@ -744,7 +745,6 @@ static INT_PTR CALLBACK _panel_func(HWND hWnd, UINT uMsg, WPARAM wParam,
   do {                                                                         \
     if ((call) != ERROR_SUCCESS)                                               \
       goto cleanup;                                                            \
-    TRACE("FUCK\n");                                                           \
   } while (false)
 static DWORD WINAPI _panel_thread(LPVOID p) {
   struct pwasio *pwasio = p;
@@ -820,38 +820,34 @@ STDMETHODIMP_(LONG32) ControlPanel(struct asio *_data) {
 }
 STDMETHODIMP_(LONG32) not_impl() { return ASIO_ERROR_NOT_PRESENT; }
 
-struct thread {
-  HANDLE handle;
-  DWORD thread_id;
-  void *(*start)(void *);
-  void *arg, *ret;
-};
 static DWORD WINAPI _thread_func(LPVOID p) {
   struct thread *t = p;
+  t->tid = pthread_self();
   t->ret = t->start(t->arg);
   return 0;
 }
-static struct spa_thread *_create(void *, const struct spa_dict *,
+static struct spa_thread *_create(void *_data, const struct spa_dict *,
                                   void *(*start)(void *), void *arg) {
-  struct thread *t = HeapAlloc(GetProcessHeap(), 0, sizeof *t);
-  if (!t)
-    return nullptr;
+  struct pwasio *pwasio = _data;
+  struct thread *t = &pwasio->thread;
 
   *t = (typeof(*t)){
       .start = start,
       .arg = arg,
   };
   t->handle = CreateThread(NULL, 0, _thread_func, t, 0, &t->thread_id);
-  if (!t->handle) {
-    HeapFree(GetProcessHeap(), 0, t);
+  if (!t->handle)
     return nullptr;
-  }
 
-  return (struct spa_thread *)t;
+  while (!t->tid)
+    ;
+
+  return (struct spa_thread *)t->tid;
 }
-static int _join(void *, struct spa_thread *p, void **retval) {
-  struct thread *t = (struct thread *)p;
-  if (!t || !t->handle)
+static int _join(void *_data, struct spa_thread *, void **retval) {
+  struct pwasio *pwasio = _data;
+  struct thread *t = &pwasio->thread;
+  if (!t->handle)
     return -1;
 
   DWORD result = WaitForSingleObject(t->handle, INFINITE);
@@ -859,7 +855,6 @@ static int _join(void *, struct spa_thread *p, void **retval) {
     *retval = t->ret;
 
   CloseHandle(t->handle);
-  HeapFree(GetProcessHeap(), 0, t);
   return (result == WAIT_OBJECT_0) ? 0 : -1;
 }
 static int _get_rt_range(void *, const struct spa_dict *, int *min, int *max) {
@@ -938,16 +933,37 @@ HRESULT WINAPI CreateInstance(LPCLASSFACTORY _data, LPUNKNOWN outer, REFIID,
       .Future = (void *)not_impl,
       .OutputReady = (void *)not_impl,
   };
+  static const struct spa_thread_utils_methods thread_utils_methods = {
+      .create = _create,
+      .join = _join,
+      .get_rt_range = _get_rt_range,
+      .acquire_rt = _acquire_rt,
+      .drop_rt = _drop_rt,
+  };
   *pwasio = (typeof(*pwasio)){
       .vtbl = &vtbl,
       .ref = 1,
       .hinst = factory->hinst,
 
+      .thread_utils =
+          {
+              .iface =
+                  {
+                      .type = SPA_TYPE_INTERFACE_ThreadUtils,
+                      .version = SPA_VERSION_THREAD_UTILS,
+                      .cb =
+                          {
+                              .funcs = &thread_utils_methods,
+                              .data = pwasio,
+                          },
+                  },
+          },
+
       .fd = -1,
       .buffer = MAP_FAILED,
   };
 
-  DWORD disp, type, out, size;
+  DWORD disp, type, out, size = sizeof out;
   CHK(RegCreateKeyExA(HKEY_CURRENT_USER, DRIVER_REG, 0, NULL, 0,
                       KEY_WRITE | KEY_READ, NULL, &config, &disp));
   if (disp == REG_CREATED_NEW_KEY) {
@@ -980,26 +996,7 @@ HRESULT WINAPI CreateInstance(LPCLASSFACTORY _data, LPUNKNOWN outer, REFIID,
     ERR("Failed to create PipeWire loop\n");
     goto cleanup;
   }
-
-  static const struct spa_thread_utils_methods thread_utils_methods = {
-      .create = _create,
-      .join = _join,
-      .get_rt_range = _get_rt_range,
-      .acquire_rt = _acquire_rt,
-      .drop_rt = _drop_rt,
-  };
-  static struct spa_thread_utils thread_utils = {
-      .iface =
-          {
-              .type = SPA_TYPE_INTERFACE_ThreadUtils,
-              .version = SPA_VERSION_THREAD_UTILS,
-              .cb =
-                  {
-                      .funcs = &thread_utils_methods,
-                  },
-          },
-  };
-  pw_data_loop_set_thread_utils(pwasio->loop, &thread_utils);
+  pw_data_loop_set_thread_utils(pwasio->loop, &pwasio->thread_utils);
 
   *ptr = pwasio;
   return S_OK;
@@ -1011,6 +1008,7 @@ cleanup:
     pwasio->vtbl->Release((struct asio *)pwasio);
   if (err != ERROR_SUCCESS)
     hr = HRESULT_FROM_WIN32(err);
+
   return hr;
 }
 #undef CHK
