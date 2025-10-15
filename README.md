@@ -51,11 +51,9 @@ WineASIO and as such all original authors from that have been kept here.
 In terms of features, stability and user-friendliness pwasio is merely a shadow
 of what WineASIO currently is. It works, but that's literally it. Care has also
 been taken so that this does not conflict with a WineASIO installation so that
-users may try out both and figure out what suits them better. Currently all
-configuration happens during compilation time. There are frequent xruns. The
-program crashes PipeWire semi-often if things are connected in the wrong order
-(whatever that means for you). Development goals include addressing all of the
-above.
+users may try out both and figure out what suits them better. Configuration
+lives in the registry and can be done through the ASIO control panel while the
+driver is loaded.
 
 ### Change Log
 
