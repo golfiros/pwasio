@@ -1,19 +1,20 @@
 #include <winresrc.h>
 #include "resource.h"
 
-IDD_PANEL DIALOG 0, 0, 200, 150
+IDD_PANEL DIALOG 0, 0, 200, 140
 STYLE DS_MODALFRAME | WS_POPUP | WS_CAPTION
 CAPTION "pwasio Control Panel"
 FONT 8, "MS Sans Serif"
 BEGIN
-  LTEXT      "Input channels",  -1,          8,   8,   84, 14
-  EDITTEXT                      IDE_INPUTS,  168, 8,   24, 14, ES_NUMBER
-  LTEXT      "Output channels", -1,          8,   38,  84, 14
-  EDITTEXT                      IDE_OUTPUTS, 168, 38,  24, 14, ES_NUMBER
-  LTEXT      "Buffer size",     -1,          8,   68,  84, 14
-  EDITTEXT                      IDE_BUFSIZE, 138, 68,  54, 14, ES_NUMBER
-  LTEXT      "Sample rate",     -1,          8,   98,  84, 14
-  EDITTEXT                      IDE_SMPRATE, 138, 98,  54, 14, ES_NUMBER
-  PUSHBUTTON "&Cancel",         IDCANCEL,        8,   128, 84, 14
-  PUSHBUTTON "&Apply",          IDOK,    108, 128, 84, 14
+  LTEXT        "Input channels",  -1,          8,   8,   84, 14
+  EDITTEXT                        IDE_INPUTS,  168, 8,   24, 14, ES_NUMBER
+  LTEXT        "Output channels", -1,          8,   30,  84, 14
+  EDITTEXT                        IDE_OUTPUTS, 168, 30,  24, 14, ES_NUMBER
+  LTEXT        "Buffer size",     -1,          8,   52,  84, 14
+  EDITTEXT                        IDE_BUFSIZE, 138, 52,  54, 14, ES_NUMBER
+  LTEXT        "Sample rate",     -1,          8,   74,  84, 14
+  EDITTEXT                        IDE_SMPRATE, 138, 74,  54, 14, ES_NUMBER
+  AUTOCHECKBOX "Autoconnect",     IDC_AUTOCON, 8,   96,  84, 14
+  PUSHBUTTON   "&Cancel",         IDCANCEL,    8,   118, 84, 14
+  PUSHBUTTON   "&Apply",          IDOK,        108, 118, 84, 14
 END

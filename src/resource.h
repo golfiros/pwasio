@@ -4,3 +4,4 @@
 #define IDE_OUTPUTS 1002
 #define IDE_BUFSIZE 1003
 #define IDE_SMPRATE 1004
+#define IDC_AUTOCON 1005

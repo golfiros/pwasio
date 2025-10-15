@@ -35,8 +35,10 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 #include <pthread.h>
 #include <sched.h>
 #include <sys/mman.h>
+#include <sys/resource.h>
 
 #include <shlwapi.h>
+#include <winuser.h>
 
 #undef strncpy
 #define strncpy lstrcpynA
@@ -74,6 +76,18 @@ WINE_DEFAULT_DEBUG_CHANNEL(asio);
     return code;                                                               \
   } while (false)
 
+#define KEY_N_INPUTS "n_inputs"
+#define KEY_N_OUTPUTS "n_outputs"
+#define KEY_BUFSIZE "buffer_size"
+#define KEY_SMPRATE "sample_rate"
+#define KEY_AUTOCON "autoconnect"
+
+#define DEF_N_INPUTS 2
+#define DEF_N_OUTPUTS 2
+#define DEF_BUFSIZE 256
+#define DEF_SMPRATE 48000
+#define DEF_AUTOCON 1
+
 struct port {
   bool active;
   size_t offset[2];
@@ -97,6 +111,7 @@ struct pwasio {
 
   char name[MAX_NAME];
   size_t n_inputs, n_outputs, buffer_size, sample_rate;
+  bool autoconnect;
 
   struct spa_thread_utils thread_utils;
   struct thread thread;
@@ -573,6 +588,10 @@ CreateBuffers(struct asio *_data, struct asio_buffer_info *channels,
       info->buf[b] = pwasio->buffer + p->offset[b];
   }
 
+  enum pw_stream_flags flags =
+      PW_STREAM_FLAG_ALLOC_BUFFERS | PW_STREAM_FLAG_RT_PROCESS;
+  if (pwasio->autoconnect)
+    flags |= PW_STREAM_FLAG_AUTOCONNECT;
   char buf[1024];
   {
     struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buf, sizeof buf);
@@ -591,15 +610,14 @@ CreateBuffers(struct asio *_data, struct asio_buffer_info *channels,
             SPA_POD_Int(sizeof(float)), SPA_PARAM_BUFFERS_align,
             SPA_POD_Int(offset * sizeof(float))),
     };
-    if (pw_stream_connect(pwasio->input, PW_DIRECTION_INPUT, PW_ID_ANY,
-                          PW_STREAM_FLAG_ALLOC_BUFFERS |
-                              PW_STREAM_FLAG_RT_PROCESS,
+    if (pw_stream_connect(pwasio->input, PW_DIRECTION_INPUT, PW_ID_ANY, flags,
                           params, SPA_N_ELEMENTS(params)) < 0) {
       sprintf(msg, "Failed to connect input stream\n");
       res = ASIO_ERROR_NO_MEMORY;
       goto cleanup;
     }
   }
+  flags |= PW_STREAM_FLAG_DRIVER;
   {
     struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buf, sizeof buf);
     const struct spa_pod *params[] = {
@@ -617,9 +635,7 @@ CreateBuffers(struct asio *_data, struct asio_buffer_info *channels,
             SPA_POD_Int(sizeof(float)), SPA_PARAM_BUFFERS_align,
             SPA_POD_Int(offset * sizeof(float))),
     };
-    if (pw_stream_connect(pwasio->output, PW_DIRECTION_OUTPUT, PW_ID_ANY,
-                          PW_STREAM_FLAG_ALLOC_BUFFERS |
-                              PW_STREAM_FLAG_RT_PROCESS | PW_STREAM_FLAG_DRIVER,
+    if (pw_stream_connect(pwasio->output, PW_DIRECTION_OUTPUT, PW_ID_ANY, flags,
                           params, SPA_N_ELEMENTS(params)) < 0) {
       sprintf(msg, "Failed to connect output stream\n");
       res = ASIO_ERROR_NO_MEMORY;
@@ -680,6 +696,7 @@ STDMETHODIMP_(LONG32) DisposeBuffers(struct asio *_data) {
 
 struct cfg {
   size_t n_inputs, n_outputs, buffer_size, sample_rate;
+  bool autoconnect;
   bool reset;
 };
 static INT_PTR CALLBACK _panel_func(HWND hWnd, UINT uMsg, WPARAM wParam,
@@ -694,6 +711,8 @@ static INT_PTR CALLBACK _panel_func(HWND hWnd, UINT uMsg, WPARAM wParam,
     SetDlgItemInt(hWnd, IDE_OUTPUTS, cfg->n_outputs, false);
     SetDlgItemInt(hWnd, IDE_BUFSIZE, cfg->buffer_size, false);
     SetDlgItemInt(hWnd, IDE_SMPRATE, cfg->sample_rate, false);
+    CheckDlgButton(hWnd, IDC_AUTOCON,
+                   cfg->autoconnect ? BST_CHECKED : BST_UNCHECKED);
     break;
   case WM_COMMAND:
     switch (LOWORD(wParam)) {
@@ -726,6 +745,10 @@ static INT_PTR CALLBACK _panel_func(HWND hWnd, UINT uMsg, WPARAM wParam,
         cfg->reset = cfg->reset || val != cfg->sample_rate;
         cfg->sample_rate = val;
       }
+
+      val = IsDlgButtonChecked(hWnd, IDC_AUTOCON) == BST_CHECKED;
+      cfg->reset = cfg->reset || val != cfg->autoconnect;
+      cfg->autoconnect = val;
     case IDCANCEL:
       DestroyWindow(hWnd);
       break;
@@ -753,6 +776,7 @@ static DWORD WINAPI _panel_thread(LPVOID p) {
       .n_outputs = pwasio->n_outputs,
       .buffer_size = pwasio->buffer_size,
       .sample_rate = pwasio->sample_rate,
+      .autoconnect = pwasio->autoconnect,
   };
   if (!(pwasio->dialog = CreateDialogParamA(pwasio->hinst,
                                             (LPCSTR)MAKEINTRESOURCE(IDD_PANEL),
@@ -774,17 +798,20 @@ static DWORD WINAPI _panel_thread(LPVOID p) {
     CHK(RegOpenKeyExA(HKEY_CURRENT_USER, DRIVER_REG, 0, KEY_WRITE, &driver));
 
     if (cfg.n_inputs != pwasio->n_inputs)
-      CHK(RegSetValueExA(driver, "n_inputs", 0, REG_DWORD,
+      CHK(RegSetValueExA(driver, KEY_N_INPUTS, 0, REG_DWORD,
                          (BYTE *)&(DWORD){cfg.n_inputs}, sizeof(DWORD)));
     if (cfg.n_outputs != pwasio->n_outputs)
-      CHK(RegSetValueExA(driver, "n_outputs", 0, REG_DWORD,
+      CHK(RegSetValueExA(driver, KEY_N_OUTPUTS, 0, REG_DWORD,
                          (BYTE *)&(DWORD){cfg.n_outputs}, sizeof(DWORD)));
     if (cfg.buffer_size != pwasio->buffer_size)
-      CHK(RegSetValueExA(driver, "buffer_size", 0, REG_DWORD,
+      CHK(RegSetValueExA(driver, KEY_BUFSIZE, 0, REG_DWORD,
                          (BYTE *)&(DWORD){cfg.buffer_size}, sizeof(DWORD)));
     if (cfg.sample_rate != pwasio->sample_rate)
-      CHK(RegSetValueExA(driver, "sample_rate", 0, REG_DWORD,
+      CHK(RegSetValueExA(driver, KEY_SMPRATE, 0, REG_DWORD,
                          (BYTE *)&(DWORD){cfg.sample_rate}, sizeof(DWORD)));
+    if (cfg.autoconnect != pwasio->autoconnect)
+      CHK(RegSetValueExA(driver, KEY_AUTOCON, 0, REG_DWORD,
+                         (BYTE *)&(DWORD){cfg.autoconnect}, sizeof(DWORD)));
 
     if (pwasio->callbacks && pwasio->callbacks->message)
       pwasio->callbacks->message(ASIO_MESSAGE_RESET_REQUEST, 0, nullptr,
@@ -877,12 +904,20 @@ static int _drop_rt(void *, struct spa_thread *p) {
   return -!SetThreadPriority(t->handle, THREAD_PRIORITY_NORMAL);
 }
 
-#define CHK(call)                                                              \
-  do {                                                                         \
-    err = (call);                                                              \
-    if (err != ERROR_SUCCESS)                                                  \
-      goto cleanup;                                                            \
-  } while (false)
+#define get_dword(config, key, default)                                        \
+  ({                                                                           \
+    DWORD out;                                                                 \
+    LONG err = RegQueryValueExA(config, key, 0, nullptr, (BYTE *)&out,         \
+                                &(DWORD){sizeof out});                         \
+    if (err == ERROR_FILE_NOT_FOUND)                                           \
+      err = RegSetValueExA(config, KEY_N_INPUTS, 0, REG_DWORD,                 \
+                           (BYTE *)&(DWORD){out = DEF_N_INPUTS}, sizeof out);  \
+    if (err != ERROR_SUCCESS) {                                                \
+      RegCloseKey(config);                                                     \
+      goto error_registry;                                                     \
+    }                                                                          \
+    out;                                                                       \
+  })
 HRESULT WINAPI CreateInstance(LPCLASSFACTORY _data, LPUNKNOWN outer, REFIID,
                               LPVOID *ptr) {
   if (outer)
@@ -891,9 +926,7 @@ HRESULT WINAPI CreateInstance(LPCLASSFACTORY _data, LPUNKNOWN outer, REFIID,
   if (!ptr)
     return E_INVALIDARG;
 
-  HRESULT hr = E_UNEXPECTED;
-  LONG err = ERROR_SUCCESS;
-  HKEY config = NULL;
+  HRESULT hr;
 
   struct pwasio *pwasio = *ptr = nullptr;
   pwasio = HeapAlloc(GetProcessHeap(), 0, sizeof(*pwasio));
@@ -962,30 +995,35 @@ HRESULT WINAPI CreateInstance(LPCLASSFACTORY _data, LPUNKNOWN outer, REFIID,
       .buffer = MAP_FAILED,
   };
 
-  DWORD disp, type, out, size = sizeof out;
-  CHK(RegCreateKeyExA(HKEY_CURRENT_USER, DRIVER_REG, 0, NULL, 0,
-                      KEY_WRITE | KEY_READ, NULL, &config, &disp));
-  if (disp == REG_CREATED_NEW_KEY) {
-    CHK(RegSetValueExA(config, "n_inputs", 0, REG_DWORD, (BYTE *)&(DWORD){2},
-                       sizeof(DWORD)));
-    CHK(RegSetValueExA(config, "n_outputs", 0, REG_DWORD, (BYTE *)&(DWORD){2},
-                       sizeof(DWORD)));
-    CHK(RegSetValueExA(config, "buffer_size", 0, REG_DWORD,
-                       (BYTE *)&(DWORD){256}, sizeof(DWORD)));
-    CHK(RegSetValueExA(config, "sample_rate", 0, REG_DWORD,
-                       (BYTE *)&(DWORD){48000}, sizeof(DWORD)));
+  HKEY config = NULL;
+  if (RegCreateKeyExA(HKEY_CURRENT_USER, DRIVER_REG, 0, NULL, 0,
+                      KEY_WRITE | KEY_READ, NULL, &config,
+                      nullptr) == ERROR_SUCCESS) {
+    pwasio->n_inputs = get_dword(config, KEY_N_INPUTS, DEF_N_INPUTS);
+    pwasio->n_outputs = get_dword(config, KEY_N_OUTPUTS, DEF_N_OUTPUTS);
+    pwasio->buffer_size = get_dword(config, KEY_BUFSIZE, DEF_BUFSIZE);
+    pwasio->sample_rate = get_dword(config, KEY_SMPRATE, DEF_SMPRATE);
+    pwasio->autoconnect = get_dword(config, KEY_AUTOCON, DEF_AUTOCON);
+    RegCloseKey(config);
+  } else {
+  error_registry:
+    WARN("Unable to read configuration, using defaults\n");
+    pwasio->n_inputs = DEF_N_INPUTS;
+    pwasio->n_outputs = DEF_N_OUTPUTS;
+    pwasio->buffer_size = DEF_BUFSIZE;
+    pwasio->sample_rate = DEF_SMPRATE;
+    pwasio->autoconnect = DEF_AUTOCON;
   }
-  CHK(RegQueryValueExA(config, "n_inputs", 0, &type, (BYTE *)&out, &size));
-  pwasio->n_inputs = out;
-  CHK(RegQueryValueExA(config, "n_outputs", 0, &type, (BYTE *)&out, &size));
-  pwasio->n_outputs = out;
-  CHK(RegQueryValueExA(config, "buffer_size", 0, &type, (BYTE *)&out, &size));
-  pwasio->buffer_size = out;
-  CHK(RegQueryValueExA(config, "sample_rate", 0, &type, (BYTE *)&out, &size));
-  pwasio->sample_rate = out;
 
   TRACE("Starting pwasio\n");
   SetPriorityClass(GetCurrentProcess(), REALTIME_PRIORITY_CLASS);
+  struct rlimit rl;
+  if (getrlimit(RLIMIT_RTPRIO, &rl) || rl.rlim_max < 1 || !(rl.rlim_cur = 1) ||
+      setrlimit(RLIMIT_RTPRIO, &rl)) {
+    ERR("Unable to get realtime privileges\n");
+    hr = E_UNEXPECTED;
+    goto cleanup;
+  };
 
   pw_init(nullptr, nullptr);
   TRACE("Compiled with libpipewire-%s\n", pw_get_headers_version());
@@ -993,6 +1031,7 @@ HRESULT WINAPI CreateInstance(LPCLASSFACTORY _data, LPUNKNOWN outer, REFIID,
 
   if (!(pwasio->loop = pw_data_loop_new(nullptr))) {
     ERR("Failed to create PipeWire loop\n");
+    hr = E_UNEXPECTED;
     goto cleanup;
   }
   pw_data_loop_set_thread_utils(pwasio->loop, &pwasio->thread_utils);
@@ -1001,12 +1040,8 @@ HRESULT WINAPI CreateInstance(LPCLASSFACTORY _data, LPUNKNOWN outer, REFIID,
   return S_OK;
 
 cleanup:
-  if (config)
-    RegCloseKey(config);
   if (pwasio)
     pwasio->vtbl->Release((struct asio *)pwasio);
-  if (err != ERROR_SUCCESS)
-    hr = HRESULT_FROM_WIN32(err);
 
   return hr;
 }
