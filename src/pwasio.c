@@ -88,6 +88,8 @@ WINE_DEFAULT_DEBUG_CHANNEL(asio);
 #define DEF_SMPRATE 48000
 #define DEF_AUTOCON 1
 
+#define RT_PRIORITY 10
+
 struct port {
   bool active;
   size_t offset[2];
@@ -606,9 +608,9 @@ CreateBuffers(struct asio *_data, struct asio_buffer_info *channels,
         spa_pod_builder_add_object(
             &b, SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers,
             SPA_PARAM_BUFFERS_buffers, SPA_POD_Int(2), SPA_PARAM_BUFFERS_size,
-            SPA_POD_Int(buffer_size * sizeof(float)), SPA_PARAM_BUFFERS_stride,
-            SPA_POD_Int(sizeof(float)), SPA_PARAM_BUFFERS_align,
-            SPA_POD_Int(offset * sizeof(float))),
+            SPA_POD_Int(pwasio->buffer_size * sizeof(float)),
+            SPA_PARAM_BUFFERS_stride, SPA_POD_Int(sizeof(float)),
+            SPA_PARAM_BUFFERS_align, SPA_POD_Int(offset * sizeof(float))),
     };
     if (pw_stream_connect(pwasio->input, PW_DIRECTION_INPUT, PW_ID_ANY, flags,
                           params, SPA_N_ELEMENTS(params)) < 0) {
@@ -631,9 +633,9 @@ CreateBuffers(struct asio *_data, struct asio_buffer_info *channels,
         spa_pod_builder_add_object(
             &b, SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers,
             SPA_PARAM_BUFFERS_buffers, SPA_POD_Int(2), SPA_PARAM_BUFFERS_size,
-            SPA_POD_Int(buffer_size * sizeof(float)), SPA_PARAM_BUFFERS_stride,
-            SPA_POD_Int(sizeof(float)), SPA_PARAM_BUFFERS_align,
-            SPA_POD_Int(offset * sizeof(float))),
+            SPA_POD_Int(pwasio->buffer_size * sizeof(float)),
+            SPA_PARAM_BUFFERS_stride, SPA_POD_Int(sizeof(float)),
+            SPA_PARAM_BUFFERS_align, SPA_POD_Int(offset * sizeof(float))),
     };
     if (pw_stream_connect(pwasio->output, PW_DIRECTION_OUTPUT, PW_ID_ANY, flags,
                           params, SPA_N_ELEMENTS(params)) < 0) {
@@ -794,31 +796,32 @@ static DWORD WINAPI _panel_thread(LPVOID p) {
   }
 
   if (cfg.reset) {
-    HKEY driver = NULL;
-    CHK(RegOpenKeyExA(HKEY_CURRENT_USER, DRIVER_REG, 0, KEY_WRITE, &driver));
+    HKEY config = NULL;
+    CHK(RegOpenKeyExA(HKEY_CURRENT_USER, DRIVER_REG, 0, KEY_WRITE, &config));
 
     if (cfg.n_inputs != pwasio->n_inputs)
-      CHK(RegSetValueExA(driver, KEY_N_INPUTS, 0, REG_DWORD,
+      CHK(RegSetValueExA(config, KEY_N_INPUTS, 0, REG_DWORD,
                          (BYTE *)&(DWORD){cfg.n_inputs}, sizeof(DWORD)));
     if (cfg.n_outputs != pwasio->n_outputs)
-      CHK(RegSetValueExA(driver, KEY_N_OUTPUTS, 0, REG_DWORD,
+      CHK(RegSetValueExA(config, KEY_N_OUTPUTS, 0, REG_DWORD,
                          (BYTE *)&(DWORD){cfg.n_outputs}, sizeof(DWORD)));
     if (cfg.buffer_size != pwasio->buffer_size)
-      CHK(RegSetValueExA(driver, KEY_BUFSIZE, 0, REG_DWORD,
+      CHK(RegSetValueExA(config, KEY_BUFSIZE, 0, REG_DWORD,
                          (BYTE *)&(DWORD){cfg.buffer_size}, sizeof(DWORD)));
     if (cfg.sample_rate != pwasio->sample_rate)
-      CHK(RegSetValueExA(driver, KEY_SMPRATE, 0, REG_DWORD,
+      CHK(RegSetValueExA(config, KEY_SMPRATE, 0, REG_DWORD,
                          (BYTE *)&(DWORD){cfg.sample_rate}, sizeof(DWORD)));
     if (cfg.autoconnect != pwasio->autoconnect)
-      CHK(RegSetValueExA(driver, KEY_AUTOCON, 0, REG_DWORD,
+      CHK(RegSetValueExA(config, KEY_AUTOCON, 0, REG_DWORD,
                          (BYTE *)&(DWORD){cfg.autoconnect}, sizeof(DWORD)));
 
     if (pwasio->callbacks && pwasio->callbacks->message)
       pwasio->callbacks->message(ASIO_MESSAGE_RESET_REQUEST, 0, nullptr,
                                  nullptr);
   cleanup:
-    if (driver)
-      RegCloseKey(driver);
+    WARN("Failed to write configuration\n");
+    if (config)
+      RegCloseKey(config);
   }
 
   pwasio->dialog = nullptr;
@@ -849,6 +852,7 @@ STDMETHODIMP_(LONG32) not_impl() { return ASIO_ERROR_NOT_PRESENT; }
 static DWORD WINAPI _thread_func(LPVOID p) {
   struct thread *t = p;
   t->tid = pthread_self();
+  TRACE("running in thread %ld\n", t->tid);
   t->ret = t->start(t->arg);
   return 0;
 }
@@ -867,6 +871,7 @@ static struct spa_thread *_create(void *_data, const struct spa_dict *,
 
   while (!t->tid)
     ;
+  TRACE("running in thread %ld\n", t->tid);
 
   return (struct spa_thread *)t->tid;
 }
@@ -888,20 +893,24 @@ static int _get_rt_range(void *, const struct spa_dict *, int *min, int *max) {
   *max = THREAD_PRIORITY_TIME_CRITICAL;
   return 0;
 }
-static int _acquire_rt(void *, struct spa_thread *p, int priority) {
-  struct thread *t = (struct thread *)p;
+static int _acquire_rt(void *_data, struct spa_thread *, int priority) {
+  struct pwasio *pwasio = _data;
   if (priority == -1) {
     priority = THREAD_PRIORITY_TIME_CRITICAL;
     sched_setscheduler(0, SCHED_FIFO,
-                       &(struct sched_param){.sched_priority = 1});
+                       &(struct sched_param){.sched_priority = RT_PRIORITY});
+    pthread_setschedparam(pwasio->thread.tid, SCHED_FIFO,
+                          &(struct sched_param){.sched_priority = RT_PRIORITY});
   }
-  return -!SetThreadPriority(t->handle, priority);
+  return -!SetThreadPriority(pwasio->thread.handle, priority);
 }
-static int _drop_rt(void *, struct spa_thread *p) {
-  struct thread *t = (struct thread *)p;
+static int _drop_rt(void *_data, struct spa_thread *) {
+  struct pwasio *pwasio = _data;
   sched_setscheduler(0, SCHED_OTHER,
                      &(struct sched_param){.sched_priority = 0});
-  return -!SetThreadPriority(t->handle, THREAD_PRIORITY_NORMAL);
+  pthread_setschedparam(pwasio->thread.tid, SCHED_OTHER,
+                        &(struct sched_param){.sched_priority = 0});
+  return -!SetThreadPriority(pwasio->thread.handle, THREAD_PRIORITY_NORMAL);
 }
 
 #define get_dword(config, key, default)                                        \
@@ -1018,8 +1027,8 @@ HRESULT WINAPI CreateInstance(LPCLASSFACTORY _data, LPUNKNOWN outer, REFIID,
   TRACE("Starting pwasio\n");
   SetPriorityClass(GetCurrentProcess(), REALTIME_PRIORITY_CLASS);
   struct rlimit rl;
-  if (getrlimit(RLIMIT_RTPRIO, &rl) || rl.rlim_max < 1 || !(rl.rlim_cur = 1) ||
-      setrlimit(RLIMIT_RTPRIO, &rl)) {
+  if (getrlimit(RLIMIT_RTPRIO, &rl) || rl.rlim_max < 1 ||
+      !(rl.rlim_cur = RT_PRIORITY) || setrlimit(RLIMIT_RTPRIO, &rl)) {
     ERR("Unable to get realtime privileges\n");
     hr = E_UNEXPECTED;
     goto cleanup;
