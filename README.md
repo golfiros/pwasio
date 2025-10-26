@@ -69,8 +69,8 @@ the specific configuration. Setting these to values not supported by your
 hardware might incur overhead.
 
 #### RT priority
-Defaults to zero which gives default thread scheduling. Setting this to > 2 will
-give the host and the driver realtime scheduling, which may be necessary to
+Defaults to zero which gives default thread scheduling. Setting this to >= 2
+will give the host and the driver realtime scheduling, which may be necessary to
 achieve lower latencies. The user must have realtime privileges. The value sets
 the `SCHED_FIFO` priority for the driver, and the host audio thread receives a
 priority of one less than what is configured (hence the minimum value nonzero
