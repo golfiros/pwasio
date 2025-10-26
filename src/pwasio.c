@@ -48,17 +48,6 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 #include <assert.h>
 #include <wine/debug.h>
 WINE_DEFAULT_DEBUG_CHANNEL(asio);
-/*
-#define assert_eq(x, y, fx, fy)                                                \
-  do {                                                                         \
-    typeof(x) _x = (x);                                                        \
-    typeof(y) _y = (y);                                                        \
-    if (_x != _y) {                                                            \
-      ERR(#x " = " #fx ", " #y " = " #fy "\n", _x, _y);                        \
-      assert(_x == _y && #x "==" #y);                                          \
-    }                                                                          \
-  } while (false)
-*/
 #else
 #define assert(...)
 #define assert_eq(...)
@@ -81,14 +70,14 @@ WINE_DEFAULT_DEBUG_CHANNEL(asio);
 #define KEY_BUFSIZE "buffer_size"
 #define KEY_SMPRATE "sample_rate"
 #define KEY_AUTOCON "autoconnect"
+#define KEY_PRIORITY "priority"
 
 #define DEF_N_INPUTS 2
 #define DEF_N_OUTPUTS 2
 #define DEF_BUFSIZE 256
 #define DEF_SMPRATE 48000
 #define DEF_AUTOCON 1
-
-#define RT_PRIORITY 10
+#define DEF_PRIORITY 0
 
 struct port {
   bool active;
@@ -114,6 +103,7 @@ struct pwasio {
   char name[MAX_NAME];
   size_t n_inputs, n_outputs, buffer_size, sample_rate;
   bool autoconnect;
+  int priority;
 
   struct spa_thread_utils thread_utils;
   struct thread thread;
@@ -180,8 +170,9 @@ STDMETHODIMP_(ULONG32) Release(struct asio *_data) {
 
   pw_deinit();
 
-  sched_setscheduler(0, SCHED_OTHER,
-                     &(struct sched_param){.sched_priority = 0});
+  if (pwasio->priority)
+    sched_setscheduler(0, SCHED_OTHER,
+                       &(struct sched_param){.sched_priority = 0});
 
   HeapFree(GetProcessHeap(), 0, pwasio);
 
@@ -703,6 +694,7 @@ STDMETHODIMP_(LONG32) DisposeBuffers(struct asio *_data) {
 struct cfg {
   size_t n_inputs, n_outputs, buffer_size, sample_rate;
   bool autoconnect;
+  int priority;
   bool reset;
 };
 static INT_PTR CALLBACK _panel_func(HWND hWnd, UINT uMsg, WPARAM wParam,
@@ -719,42 +711,49 @@ static INT_PTR CALLBACK _panel_func(HWND hWnd, UINT uMsg, WPARAM wParam,
     SetDlgItemInt(hWnd, IDE_SMPRATE, cfg->sample_rate, false);
     CheckDlgButton(hWnd, IDC_AUTOCON,
                    cfg->autoconnect ? BST_CHECKED : BST_UNCHECKED);
+    SetDlgItemInt(hWnd, IDE_PRIORITY, cfg->priority, false);
     break;
   case WM_COMMAND:
     switch (LOWORD(wParam)) {
     case IDOK:
       BOOL conv;
-      size_t val;
+      INT val;
 
-      val = GetDlgItemInt(hWnd, IDE_INPUTS, &conv, false);
-      if (conv) {
+      val = GetDlgItemInt(hWnd, IDE_INPUTS, &conv, true);
+      if (conv && val >= 0) {
         val = SPA_MIN(val, MAX_PORTS);
-        cfg->reset = cfg->reset || val != cfg->n_inputs;
+        cfg->reset = cfg->reset || (UINT)val != cfg->n_inputs;
         cfg->n_inputs = val;
       }
 
-      val = GetDlgItemInt(hWnd, IDE_OUTPUTS, &conv, false);
-      if (conv) {
+      val = GetDlgItemInt(hWnd, IDE_OUTPUTS, &conv, true);
+      if (conv && val >= 0) {
         val = SPA_MIN(val, MAX_PORTS);
-        cfg->reset = cfg->reset || val != cfg->n_outputs;
+        cfg->reset = cfg->reset || (UINT)val != cfg->n_outputs;
         cfg->n_outputs = val;
       }
 
-      val = GetDlgItemInt(hWnd, IDE_BUFSIZE, &conv, false);
-      if (conv) {
-        cfg->reset = cfg->reset || val != cfg->buffer_size;
+      val = GetDlgItemInt(hWnd, IDE_BUFSIZE, &conv, true);
+      if (conv && val > 0) {
+        cfg->reset = cfg->reset || (UINT)val != cfg->buffer_size;
         cfg->buffer_size = val;
       }
 
-      val = GetDlgItemInt(hWnd, IDE_SMPRATE, &conv, false);
-      if (conv) {
-        cfg->reset = cfg->reset || val != cfg->sample_rate;
+      val = GetDlgItemInt(hWnd, IDE_SMPRATE, &conv, true);
+      if (conv && val > 0) {
+        cfg->reset = cfg->reset || (UINT)val != cfg->sample_rate;
         cfg->sample_rate = val;
       }
 
       val = IsDlgButtonChecked(hWnd, IDC_AUTOCON) == BST_CHECKED;
       cfg->reset = cfg->reset || val != cfg->autoconnect;
       cfg->autoconnect = val;
+
+      val = GetDlgItemInt(hWnd, IDE_PRIORITY, &conv, true);
+      if (conv && val >= 0 && val != 1) {
+        cfg->reset = cfg->reset || val != cfg->priority;
+        cfg->priority = val;
+      }
     case IDCANCEL:
       DestroyWindow(hWnd);
       break;
@@ -783,6 +782,7 @@ static DWORD WINAPI _panel_thread(LPVOID p) {
       .buffer_size = pwasio->buffer_size,
       .sample_rate = pwasio->sample_rate,
       .autoconnect = pwasio->autoconnect,
+      .priority = pwasio->priority,
   };
   if (!(pwasio->dialog = CreateDialogParamA(pwasio->hinst,
                                             (LPCSTR)MAKEINTRESOURCE(IDD_PANEL),
@@ -818,6 +818,9 @@ static DWORD WINAPI _panel_thread(LPVOID p) {
     if (cfg.autoconnect != pwasio->autoconnect)
       CHK(RegSetValueExA(config, KEY_AUTOCON, 0, REG_DWORD,
                          (BYTE *)&(DWORD){cfg.autoconnect}, sizeof(DWORD)));
+    if (cfg.priority != pwasio->priority)
+      CHK(RegSetValueExA(config, KEY_PRIORITY, 0, REG_DWORD,
+                         (BYTE *)&(DWORD){cfg.priority}, sizeof(DWORD)));
 
     if (pwasio->callbacks && pwasio->callbacks->message)
       pwasio->callbacks->message(ASIO_MESSAGE_RESET_REQUEST, 0, nullptr,
@@ -856,7 +859,6 @@ STDMETHODIMP_(LONG32) not_impl() { return ASIO_ERROR_NOT_PRESENT; }
 static DWORD WINAPI _thread_func(LPVOID p) {
   struct thread *t = p;
   t->tid = pthread_self();
-  TRACE("running in thread %ld\n", t->tid);
   t->ret = t->start(t->arg);
   return 0;
 }
@@ -875,7 +877,6 @@ static struct spa_thread *_create(void *_data, const struct spa_dict *,
 
   while (!t->tid)
     ;
-  TRACE("running in thread %ld\n", t->tid);
 
   return (struct spa_thread *)t->tid;
 }
@@ -899,17 +900,19 @@ static int _get_rt_range(void *, const struct spa_dict *, int *min, int *max) {
 }
 static int _acquire_rt(void *_data, struct spa_thread *, int priority) {
   struct pwasio *pwasio = _data;
-  if (priority == -1) {
+  if (pwasio->priority && priority == -1) {
     priority = THREAD_PRIORITY_TIME_CRITICAL;
-    pthread_setschedparam(pwasio->thread.tid, SCHED_FIFO,
-                          &(struct sched_param){.sched_priority = RT_PRIORITY});
+    pthread_setschedparam(
+        pwasio->thread.tid, SCHED_FIFO,
+        &(struct sched_param){.sched_priority = pwasio->priority});
   }
   return -!SetThreadPriority(pwasio->thread.handle, priority);
 }
 static int _drop_rt(void *_data, struct spa_thread *) {
   struct pwasio *pwasio = _data;
-  pthread_setschedparam(pwasio->thread.tid, SCHED_OTHER,
-                        &(struct sched_param){.sched_priority = 0});
+  if (pwasio->priority)
+    pthread_setschedparam(pwasio->thread.tid, SCHED_OTHER,
+                          &(struct sched_param){.sched_priority = 0});
   return -!SetThreadPriority(pwasio->thread.handle, THREAD_PRIORITY_NORMAL);
 }
 
@@ -919,8 +922,8 @@ static int _drop_rt(void *_data, struct spa_thread *) {
     LONG err = RegQueryValueExA(config, key, 0, nullptr, (BYTE *)&out,         \
                                 &(DWORD){sizeof out});                         \
     if (err == ERROR_FILE_NOT_FOUND)                                           \
-      err = RegSetValueExA(config, KEY_N_INPUTS, 0, REG_DWORD,                 \
-                           (BYTE *)&(DWORD){out = DEF_N_INPUTS}, sizeof out);  \
+      err = RegSetValueExA(config, key, 0, REG_DWORD,                          \
+                           (BYTE *)&(DWORD){out = default}, sizeof out);       \
     if (err != ERROR_SUCCESS) {                                                \
       RegCloseKey(config);                                                     \
       goto error_registry;                                                     \
@@ -1013,6 +1016,7 @@ HRESULT WINAPI CreateInstance(LPCLASSFACTORY _data, LPUNKNOWN outer, REFIID,
     pwasio->buffer_size = get_dword(config, KEY_BUFSIZE, DEF_BUFSIZE);
     pwasio->sample_rate = get_dword(config, KEY_SMPRATE, DEF_SMPRATE);
     pwasio->autoconnect = get_dword(config, KEY_AUTOCON, DEF_AUTOCON);
+    pwasio->priority = get_dword(config, KEY_PRIORITY, DEF_PRIORITY);
     RegCloseKey(config);
   } else {
   error_registry:
@@ -1022,20 +1026,23 @@ HRESULT WINAPI CreateInstance(LPCLASSFACTORY _data, LPUNKNOWN outer, REFIID,
     pwasio->buffer_size = DEF_BUFSIZE;
     pwasio->sample_rate = DEF_SMPRATE;
     pwasio->autoconnect = DEF_AUTOCON;
+    pwasio->priority = DEF_PRIORITY;
   }
 
   TRACE("Starting pwasio\n");
   SetPriorityClass(GetCurrentProcess(), REALTIME_PRIORITY_CLASS);
-  struct rlimit rl;
-  if (getrlimit(RLIMIT_RTPRIO, &rl) || rl.rlim_max < 1 ||
-      !(rl.rlim_cur = RT_PRIORITY) || setrlimit(RLIMIT_RTPRIO, &rl) ||
-      sched_setscheduler(
-          0, SCHED_FIFO,
-          &(struct sched_param){.sched_priority = RT_PRIORITY - 1})) {
-    ERR("Unable to get realtime privileges\n");
-    hr = E_UNEXPECTED;
-    goto cleanup;
-  };
+  if (pwasio->priority) {
+    struct rlimit rl;
+    if (getrlimit(RLIMIT_RTPRIO, &rl) || rl.rlim_max < 1 ||
+        !(rl.rlim_cur = pwasio->priority) || setrlimit(RLIMIT_RTPRIO, &rl) ||
+        sched_setscheduler(
+            0, SCHED_FIFO,
+            &(struct sched_param){.sched_priority = pwasio->priority - 1})) {
+      ERR("Unable to get realtime privileges\n");
+      hr = E_UNEXPECTED;
+      goto cleanup;
+    }
+  }
 
   pw_init(nullptr, nullptr);
   TRACE("Compiled with libpipewire-%s\n", pw_get_headers_version());

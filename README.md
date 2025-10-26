@@ -51,13 +51,35 @@ WineASIO and as such all original authors from that have been kept here.
 In terms of features, stability and user-friendliness pwasio is merely a shadow
 of what WineASIO currently is. It works, but that's literally it. Care has also
 been taken so that this does not conflict with a WineASIO installation so that
-users may try out both and figure out what suits them better. Configuration
-lives in the registry and can be done through the ASIO control panel while the
-driver is loaded.
+users may try out both and figure out what suits them better. 
+
+### Configuration
+
+Configuration lives in the registry at `HKEY_CURRENT_USER\Software\ASIO\pwasio`
+and can be done through the ASIO control panel while the driver is loaded.
+
+![Screenshot](screenshot.jpg)
+
+Most options are self explanatory. However,
+
+#### Buffer size and sample rate
+These options operate through the PipeWire `PW_KEY_NODE_FORCE_QUANTUM` and
+`PW_KEY_NODE_FORCE_RATE` options, which force the PipeWire graph to run under
+the specific configuration. Setting these to values not supported by your
+hardware might incur overhead.
+
+#### RT priority
+Defaults to zero which gives default thread scheduling. Setting this to > 2 will
+give the host and the driver realtime scheduling, which may be necessary to
+achieve lower latencies. The user must have realtime privileges. The value sets
+the `SCHED_FIFO` priority for the driver, and the host audio thread receives a
+priority of one less than what is configured (hence the minimum value nonzero
+value of 2).
 
 ### Change Log
 
 #### 0.0.1
+* 26/10/2025: Driver can now run in realtime thread (GG)
 * 11/10/2025: Add control panel and persistent configuration (GG)
 * 10/10/2025: Use decoupled input and output streams (GG)
 * 21/09/2025: PipeWire now directly uses the ASIO buffers (GG)
