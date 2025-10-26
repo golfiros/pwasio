@@ -177,7 +177,11 @@ STDMETHODIMP_(ULONG32) Release(struct asio *_data) {
     pw_stream_destroy(pwasio->input);
   if (pwasio->loop)
     pw_data_loop_destroy(pwasio->loop);
+
   pw_deinit();
+
+  sched_setscheduler(0, SCHED_OTHER,
+                     &(struct sched_param){.sched_priority = 0});
 
   HeapFree(GetProcessHeap(), 0, pwasio);
 
@@ -897,8 +901,6 @@ static int _acquire_rt(void *_data, struct spa_thread *, int priority) {
   struct pwasio *pwasio = _data;
   if (priority == -1) {
     priority = THREAD_PRIORITY_TIME_CRITICAL;
-    sched_setscheduler(0, SCHED_FIFO,
-                       &(struct sched_param){.sched_priority = RT_PRIORITY});
     pthread_setschedparam(pwasio->thread.tid, SCHED_FIFO,
                           &(struct sched_param){.sched_priority = RT_PRIORITY});
   }
@@ -906,8 +908,6 @@ static int _acquire_rt(void *_data, struct spa_thread *, int priority) {
 }
 static int _drop_rt(void *_data, struct spa_thread *) {
   struct pwasio *pwasio = _data;
-  sched_setscheduler(0, SCHED_OTHER,
-                     &(struct sched_param){.sched_priority = 0});
   pthread_setschedparam(pwasio->thread.tid, SCHED_OTHER,
                         &(struct sched_param){.sched_priority = 0});
   return -!SetThreadPriority(pwasio->thread.handle, THREAD_PRIORITY_NORMAL);
@@ -1028,7 +1028,10 @@ HRESULT WINAPI CreateInstance(LPCLASSFACTORY _data, LPUNKNOWN outer, REFIID,
   SetPriorityClass(GetCurrentProcess(), REALTIME_PRIORITY_CLASS);
   struct rlimit rl;
   if (getrlimit(RLIMIT_RTPRIO, &rl) || rl.rlim_max < 1 ||
-      !(rl.rlim_cur = RT_PRIORITY) || setrlimit(RLIMIT_RTPRIO, &rl)) {
+      !(rl.rlim_cur = RT_PRIORITY) || setrlimit(RLIMIT_RTPRIO, &rl) ||
+      sched_setscheduler(
+          0, SCHED_FIFO,
+          &(struct sched_param){.sched_priority = RT_PRIORITY - 1})) {
     ERR("Unable to get realtime privileges\n");
     hr = E_UNEXPECTED;
     goto cleanup;
