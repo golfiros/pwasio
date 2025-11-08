@@ -15,14 +15,14 @@ CC := clang
 LIBS := -lodbc32 -lole32 -luuid -lwinmm -lshlwapi -lgdi32
 PKG_CONFIG := libpipewire-0.3
 CFLAGS := -fPIC -Wextra -Wall -Wno-missing-field-initializers -std=gnu23
-DEFNS := -D_REENTRANT -DLIB_NAME='"$(LIB_NAME)"' -DDRIVER_REG='"$(DRIVER_REG)"'
+DEFNS := -D_REENTRANT -D_GNU_SOURCE -D__WINESRC__ -DLIB_NAME='"$(LIB_NAME)"' -DDRIVER_REG='"$(DRIVER_REG)"'
 DEFNS += -DPWASIO_VERSION_MAJOR=$(VERSION_MAJOR)
 DEFNS += -DPWASIO_VERSION_MINOR=$(VERSION_MINOR)
 DEFNS += -DPWASIO_VERSION_PATCH=$(VERSION_PATCH)
 
 ifeq ($(DEBUG),true)
 CFLAGS += -O0 -g
-DEFNS += -DDEBUG -D__WINESRC__
+DEFNS += -DDEBUG
 else
 CFLAGS += -O3 
 DEFNS += -DNDEBUG

@@ -25,8 +25,6 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-#define _GNU_SOURCE
-
 #include "pwasio.h"
 #include "asio.h"
 #include "resource.h"
@@ -45,12 +43,9 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 #include <spa/param/audio/format-utils.h>
 
 #ifdef DEBUG
-#include <assert.h>
 #include <wine/debug.h>
 WINE_DEFAULT_DEBUG_CHANNEL(asio);
 #else
-#define assert(...)
-#define assert_eq(...)
 #define TRACE(...)
 #define WARN(...)
 #define ERR(...)
@@ -72,12 +67,12 @@ WINE_DEFAULT_DEBUG_CHANNEL(asio);
 #define KEY_AUTOCON "autoconnect"
 #define KEY_PRIORITY "priority"
 
-#define DEF_N_INPUTS 2
-#define DEF_N_OUTPUTS 2
-#define DEF_BUFSIZE 256
-#define DEF_SMPRATE 48000
-#define DEF_AUTOCON 1
-#define DEF_PRIORITY 0
+#define DEFAULT_N_INPUTS 2
+#define DEFAULT_N_OUTPUTS 2
+#define DEFAULT_BUFSIZE 256
+#define DEFAULT_SMPRATE 48000
+#define DEFAULT_AUTOCON 1
+#define DEFAULT_PRIORITY 0
 
 struct port {
   bool active;
@@ -87,7 +82,7 @@ struct port {
 struct thread {
   HANDLE handle;
   DWORD thread_id;
-  pthread_t tid;
+  volatile pthread_t tid;
 
   void *(*start)(void *);
   void *arg, *ret;
@@ -754,6 +749,7 @@ static INT_PTR CALLBACK _panel_func(HWND hWnd, UINT uMsg, WPARAM wParam,
         cfg->reset = cfg->reset || val != cfg->priority;
         cfg->priority = val;
       }
+      break;
     case IDCANCEL:
       DestroyWindow(hWnd);
       break;
@@ -1011,22 +1007,22 @@ HRESULT WINAPI CreateInstance(LPCLASSFACTORY _data, LPUNKNOWN outer, REFIID,
   if (RegCreateKeyExA(HKEY_CURRENT_USER, DRIVER_REG, 0, NULL, 0,
                       KEY_WRITE | KEY_READ, NULL, &config,
                       nullptr) == ERROR_SUCCESS) {
-    pwasio->n_inputs = get_dword(config, KEY_N_INPUTS, DEF_N_INPUTS);
-    pwasio->n_outputs = get_dword(config, KEY_N_OUTPUTS, DEF_N_OUTPUTS);
-    pwasio->buffer_size = get_dword(config, KEY_BUFSIZE, DEF_BUFSIZE);
-    pwasio->sample_rate = get_dword(config, KEY_SMPRATE, DEF_SMPRATE);
-    pwasio->autoconnect = get_dword(config, KEY_AUTOCON, DEF_AUTOCON);
-    pwasio->priority = get_dword(config, KEY_PRIORITY, DEF_PRIORITY);
+    pwasio->n_inputs = get_dword(config, KEY_N_INPUTS, DEFAULT_N_INPUTS);
+    pwasio->n_outputs = get_dword(config, KEY_N_OUTPUTS, DEFAULT_N_OUTPUTS);
+    pwasio->buffer_size = get_dword(config, KEY_BUFSIZE, DEFAULT_BUFSIZE);
+    pwasio->sample_rate = get_dword(config, KEY_SMPRATE, DEFAULT_SMPRATE);
+    pwasio->autoconnect = get_dword(config, KEY_AUTOCON, DEFAULT_AUTOCON);
+    pwasio->priority = get_dword(config, KEY_PRIORITY, DEFAULT_PRIORITY);
     RegCloseKey(config);
   } else {
   error_registry:
     WARN("Unable to read configuration, using defaults\n");
-    pwasio->n_inputs = DEF_N_INPUTS;
-    pwasio->n_outputs = DEF_N_OUTPUTS;
-    pwasio->buffer_size = DEF_BUFSIZE;
-    pwasio->sample_rate = DEF_SMPRATE;
-    pwasio->autoconnect = DEF_AUTOCON;
-    pwasio->priority = DEF_PRIORITY;
+    pwasio->n_inputs = DEFAULT_N_INPUTS;
+    pwasio->n_outputs = DEFAULT_N_OUTPUTS;
+    pwasio->buffer_size = DEFAULT_BUFSIZE;
+    pwasio->sample_rate = DEFAULT_SMPRATE;
+    pwasio->autoconnect = DEFAULT_AUTOCON;
+    pwasio->priority = DEFAULT_PRIORITY;
   }
 
   TRACE("Starting pwasio\n");
