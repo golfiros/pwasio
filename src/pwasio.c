@@ -186,7 +186,6 @@ static int _swap_buffers(struct spa_loop *, bool, uint32_t, const void *,
   return 0;
 }
 static void _input_process(void *_data) {
-  WINE_TRACE("process!\n");
   struct pwasio *pwasio = _data;
 
   pw_stream_get_time_n(pwasio->input, &pwasio->time, sizeof pwasio->time);
