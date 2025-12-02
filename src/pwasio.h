@@ -18,4 +18,13 @@ struct factory {
 
 HRESULT WINAPI CreateInstance(LPCLASSFACTORY, LPUNKNOWN, REFIID, LPVOID *);
 
+#ifdef DEBUG
+#include <wine/debug.h>
+#else
+#define WINE_DEFAULT_DEBUG_CHANNEL(...)
+#define WINE_TRACE(...)
+#define WINE_WARN(...)
+#define WINE_ERR(...)
+#endif
+
 #endif // !__PWASIO_PWASIO_H__

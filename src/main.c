@@ -20,35 +20,34 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 #include "pwasio.h"
 #include <unknwn.h>
 
-#ifdef DEBUG
-#include <wine/debug.h>
-WINE_DEFAULT_DEBUG_CHANNEL(asio);
-#else
-#define TRACE(...)
-#define WARN(...)
-#define ERR(...)
-#endif
+WINE_DEFAULT_DEBUG_CHANNEL(pwasio_dll);
 
 static HINSTANCE g_hinst;
 
 static HRESULT WINAPI QueryInterface(LPCLASSFACTORY, REFIID, LPVOID *ptr) {
+  WINE_TRACE("\n");
   return ptr ? E_NOINTERFACE : E_POINTER;
 }
 static ULONG WINAPI AddRef(LPCLASSFACTORY _data) {
+  WINE_TRACE("\n");
   struct factory *factory = (struct factory *)_data;
   return InterlockedIncrement(&factory->ref);
 }
 static ULONG WINAPI Release(LPCLASSFACTORY _data) {
+  WINE_TRACE("\n");
   struct factory *factory = (struct factory *)_data;
   if (InterlockedDecrement(&factory->ref))
     return factory->ref;
   HeapFree(GetProcessHeap(), 0, factory);
   return 0;
 }
-static HRESULT WINAPI LockServer(LPCLASSFACTORY, BOOL) { return S_OK; }
+static HRESULT WINAPI LockServer(LPCLASSFACTORY, BOOL) {
+  WINE_TRACE("\n");
+  return S_OK;
+}
 
 HRESULT WINAPI DllGetClassObject(REFCLSID rclsid, REFIID riid, LPVOID *ppvObj) {
-  TRACE("\n");
+  WINE_TRACE("\n");
   if (ppvObj == NULL || !IsEqualIID(riid, &IID_IClassFactory))
     return E_INVALIDARG;
   if (!IsEqualGUID(rclsid, &class_id))
@@ -77,9 +76,13 @@ HRESULT WINAPI DllGetClassObject(REFCLSID rclsid, REFIID riid, LPVOID *ppvObj) {
   return S_OK;
 }
 
-HRESULT WINAPI DllCanUnloadNow(void) { return S_FALSE; }
+HRESULT WINAPI DllCanUnloadNow(void) {
+  WINE_TRACE("\n");
+  return S_FALSE;
+}
 
 BOOL WINAPI DllMain(HINSTANCE hinst, DWORD reason, LPVOID) {
+  WINE_TRACE("%d\n", reason);
   if (reason == DLL_PROCESS_ATTACH)
     g_hinst = hinst;
   return TRUE;
@@ -87,15 +90,18 @@ BOOL WINAPI DllMain(HINSTANCE hinst, DWORD reason, LPVOID) {
 
 #define REG_STR(str) REG_SZ, (const BYTE *)(str), sizeof(str)
 
+HRESULT WINAPI DllRegisterServer(void) {
+  WINE_TRACE("\n");
+  LONG err = ERROR_SUCCESS;
+  HKEY class = NULL, clsid = NULL, ips32 = NULL, driver = NULL;
 #define CHK(call)                                                              \
   do {                                                                         \
     err = (call);                                                              \
-    if (err != ERROR_SUCCESS)                                                  \
+    if (err != ERROR_SUCCESS) {                                                \
+      WINE_ERR("registry call " #call "failed\n");                             \
       goto cleanup;                                                            \
+    }                                                                          \
   } while (false)
-HRESULT WINAPI DllRegisterServer(void) {
-  LONG err = ERROR_SUCCESS;
-  HKEY class = NULL, clsid = NULL, ips32 = NULL, driver = NULL;
 
   CHK(RegCreateKeyExA(HKEY_CLASSES_ROOT, "CLSID", 0, NULL, 0, KEY_WRITE, NULL,
                       &class, NULL));
@@ -119,6 +125,7 @@ HRESULT WINAPI DllRegisterServer(void) {
   WideCharToMultiByte(CP_ACP, 0, wstr, -1, str, sizeof str, NULL, NULL);
   CHK(RegSetValueExA(driver, "CLSID", 0, REG_STR(str)));
   CHK(RegSetValueExA(driver, "Description", 0, REG_STR("pwasio Driver")));
+#undef CHK
 
 cleanup:
   if (driver)
@@ -133,16 +140,18 @@ cleanup:
   return err == ERROR_SUCCESS ? S_OK : HRESULT_FROM_WIN32(err);
 }
 
-#undef CHK
+HRESULT WINAPI DllUnregisterServer(void) {
+  WINE_TRACE("\n");
+  LONG err = ERROR_SUCCESS;
+  HKEY key = NULL;
 #define CHK(call)                                                              \
   do {                                                                         \
     err = (call);                                                              \
-    if (err != ERROR_SUCCESS && err != ERROR_FILE_NOT_FOUND)                   \
+    if (err != ERROR_SUCCESS && err != ERROR_FILE_NOT_FOUND) {                 \
+      WINE_ERR("registry call " #call "failed\n");                             \
       goto cleanup;                                                            \
+    }                                                                          \
   } while (false)
-HRESULT WINAPI DllUnregisterServer(void) {
-  LONG err = ERROR_SUCCESS;
-  HKEY key = NULL;
 
   CHK(RegOpenKeyExA(HKEY_CLASSES_ROOT, "CLSID", 0, KEY_READ | KEY_WRITE, &key));
 
@@ -152,6 +161,7 @@ HRESULT WINAPI DllUnregisterServer(void) {
 
   CHK(RegDeleteTreeA(HKEY_LOCAL_MACHINE, DRIVER_REG));
   CHK(RegDeleteTreeA(HKEY_CURRENT_USER, DRIVER_REG));
+#undef CHK
 
 cleanup:
   if (key)

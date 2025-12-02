@@ -42,19 +42,13 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 #define strncpy lstrcpynA
 #include <spa/param/audio/format-utils.h>
 
-#ifdef DEBUG
-#include <wine/debug.h>
-WINE_DEFAULT_DEBUG_CHANNEL(asio);
-#else
-#define TRACE(...)
-#define WARN(...)
-#define ERR(...)
-#endif
+WINE_DEFAULT_DEBUG_CHANNEL(pwasio);
 
 #define MAX_NAME 32
 #define MAX_PORTS 32
 #define pwasio_err(code, msg, ...)                                             \
   do {                                                                         \
+    WINE_ERR(msg "\n" __VA_OPT__(, ) __VA_ARGS__);                             \
     sprintf(pwasio->err_msg, "%s: " msg "\n",                                  \
             __func__ __VA_OPT__(, ) __VA_ARGS__);                              \
     return code;                                                               \
@@ -82,7 +76,8 @@ struct port {
 struct thread {
   HANDLE handle;
   DWORD thread_id;
-  volatile pthread_t tid;
+  pthread_t tid;
+  volatile bool ready;
 
   void *(*start)(void *);
   void *arg, *ret;
@@ -119,11 +114,10 @@ struct pwasio {
 
   HANDLE panel;
   HWND dialog;
-
-  bool move;
 };
 
 STDMETHODIMP QueryInterface(struct asio *_data, REFIID riid, PVOID *out) {
+  WINE_TRACE("\n");
   struct pwasio *pwasio = (struct pwasio *)_data;
 
   if (out == NULL)
@@ -139,11 +133,13 @@ STDMETHODIMP QueryInterface(struct asio *_data, REFIID riid, PVOID *out) {
 }
 
 STDMETHODIMP_(ULONG32) AddRef(struct asio *_data) {
+  WINE_TRACE("\n");
   struct pwasio *pwasio = (struct pwasio *)_data;
   return InterlockedIncrement(&pwasio->ref);
 }
 
 STDMETHODIMP_(ULONG32) Release(struct asio *_data) {
+  WINE_TRACE("\n");
   struct pwasio *pwasio = (struct pwasio *)_data;
   if (InterlockedDecrement(&pwasio->ref))
     return pwasio->ref;
@@ -155,7 +151,8 @@ STDMETHODIMP_(ULONG32) Release(struct asio *_data) {
     CloseHandle(pwasio->panel);
   }
 
-  pwasio->vtbl->DisposeBuffers(_data);
+  if (pwasio->fd >= 0)
+    pwasio->vtbl->DisposeBuffers(_data);
   if (pwasio->output)
     pw_stream_destroy(pwasio->output);
   if (pwasio->input)
@@ -165,9 +162,11 @@ STDMETHODIMP_(ULONG32) Release(struct asio *_data) {
 
   pw_deinit();
 
-  if (pwasio->priority)
+  if (pwasio->priority) {
+    WINE_TRACE("setting host back to SCHED_OTHER\n");
     sched_setscheduler(0, SCHED_OTHER,
                        &(struct sched_param){.sched_priority = 0});
+  }
 
   HeapFree(GetProcessHeap(), 0, pwasio);
 
@@ -187,6 +186,7 @@ static int _swap_buffers(struct spa_loop *, bool, uint32_t, const void *,
   return 0;
 }
 static void _input_process(void *_data) {
+  WINE_TRACE("process!\n");
   struct pwasio *pwasio = _data;
 
   pw_stream_get_time_n(pwasio->input, &pwasio->time, sizeof pwasio->time);
@@ -254,6 +254,7 @@ static void _output_rem_buffer(void *_data, struct pw_buffer *buf) {
     pwasio->output_buf[1] = nullptr;
 }
 STDMETHODIMP_(LONG32) Init(struct asio *_data, void *) {
+  WINE_TRACE("\n");
   struct pwasio *pwasio = (struct pwasio *)_data;
 
   WCHAR path[MAX_PATH];
@@ -272,11 +273,11 @@ STDMETHODIMP_(LONG32) Init(struct asio *_data, void *) {
   };
   if (!(pwasio->input = pw_stream_new_simple(
             pw_data_loop_get_loop(pwasio->loop), pwasio->name,
-            pw_properties_new(PW_KEY_MEDIA_TYPE, "Audio", PW_KEY_MEDIA_CATEGORY,
-                              "Capture", PW_KEY_MEDIA_ROLE, "Music",
-                              PW_KEY_NODE_ALWAYS_PROCESS, "true",
-                              PW_KEY_NODE_FORCE_RATE, rate_str,
-                              PW_KEY_NODE_FORCE_QUANTUM, bufsize_str, nullptr),
+            pw_properties_new(
+                PW_KEY_MEDIA_TYPE, "Audio", PW_KEY_MEDIA_CATEGORY, "Capture",
+                PW_KEY_MEDIA_ROLE, "Music", PW_KEY_NODE_NAME, "pwasio input",
+                PW_KEY_NODE_ALWAYS_PROCESS, "true", PW_KEY_NODE_FORCE_RATE,
+                rate_str, PW_KEY_NODE_FORCE_QUANTUM, bufsize_str, nullptr),
             &input_events, pwasio)))
     pwasio_err(ASIO_ERROR_NO_MEMORY, "failed to create input stream");
 
@@ -288,11 +289,11 @@ STDMETHODIMP_(LONG32) Init(struct asio *_data, void *) {
   };
   if (!(pwasio->output = pw_stream_new_simple(
             pw_data_loop_get_loop(pwasio->loop), pwasio->name,
-            pw_properties_new(PW_KEY_MEDIA_TYPE, "Audio", PW_KEY_MEDIA_CATEGORY,
-                              "Playback", PW_KEY_MEDIA_ROLE, "Music",
-                              PW_KEY_NODE_ALWAYS_PROCESS, "true",
-                              PW_KEY_NODE_FORCE_RATE, rate_str,
-                              PW_KEY_NODE_FORCE_QUANTUM, bufsize_str, nullptr),
+            pw_properties_new(
+                PW_KEY_MEDIA_TYPE, "Audio", PW_KEY_MEDIA_CATEGORY, "Playback",
+                PW_KEY_MEDIA_ROLE, "Music", PW_KEY_NODE_NAME, "pwasio output",
+                PW_KEY_NODE_ALWAYS_PROCESS, "true", PW_KEY_NODE_FORCE_RATE,
+                rate_str, PW_KEY_NODE_FORCE_QUANTUM, bufsize_str, nullptr),
             &output_events, pwasio))) {
     pw_stream_destroy(pwasio->input);
     pwasio->input = nullptr;
@@ -303,24 +304,28 @@ STDMETHODIMP_(LONG32) Init(struct asio *_data, void *) {
 }
 
 STDMETHODIMP_(VOID) GetDriverName(struct asio *, PSTR name) {
+  WINE_TRACE("%p\n", name);
   strcpy(name, "pwasio");
 }
 
 STDMETHODIMP_(LONG32) GetDriverVersion(struct asio *) {
+  WINE_TRACE("\n");
   return (PWASIO_VERSION_MAJOR << 20) + (PWASIO_VERSION_MINOR << 10) +
          (PWASIO_VERSION_PATCH);
 }
 
 STDMETHODIMP_(VOID) GetErrorMessage(struct asio *_data, PSTR string) {
+  WINE_TRACE("\n");
   struct pwasio *pwasio = (struct pwasio *)_data;
   if (*pwasio->err_msg) {
     strcpy(string, pwasio->err_msg);
     *pwasio->err_msg = '\0';
   } else
-    strcpy(string, "Undocumented error\n");
+    strcpy(string, "undocumented error\n");
 }
 
 STDMETHODIMP_(LONG32) Start(struct asio *_data) {
+  WINE_TRACE("\n");
   struct pwasio *pwasio = (struct pwasio *)_data;
 
   if (!pwasio->input || !pwasio->output)
@@ -334,6 +339,7 @@ STDMETHODIMP_(LONG32) Start(struct asio *_data) {
 }
 
 STDMETHODIMP_(LONG32) Stop(struct asio *_data) {
+  WINE_TRACE("\n");
   struct pwasio *pwasio = (struct pwasio *)_data;
 
   if (!pwasio->input || !pwasio->output)
@@ -349,6 +355,7 @@ STDMETHODIMP_(LONG32) Stop(struct asio *_data) {
 
 STDMETHODIMP_(LONG32)
 GetChannels(struct asio *_data, LONG *n_inputs, LONG *n_outputs) {
+  WINE_TRACE("\n");
   if (!n_inputs || !n_outputs)
     return ASIO_ERROR_INVALID_PARAMETER;
 
@@ -364,6 +371,7 @@ GetChannels(struct asio *_data, LONG *n_inputs, LONG *n_outputs) {
 }
 
 STDMETHODIMP_(LONG) GetLatencies(struct asio *_data, LONG *in, LONG *out) {
+  WINE_TRACE("\n");
   if (!in || !out)
     return ASIO_ERROR_INVALID_PARAMETER;
 
@@ -381,6 +389,7 @@ STDMETHODIMP_(LONG) GetLatencies(struct asio *_data, LONG *in, LONG *out) {
 STDMETHODIMP_(LONG32)
 GetBufferSize(struct asio *_data, LONG32 *min, LONG32 *max, LONG32 *pref,
               LONG32 *grn) {
+  WINE_TRACE("\n");
   if (!min || !max || !pref || !grn)
     return ASIO_ERROR_INVALID_PARAMETER;
 
@@ -395,6 +404,7 @@ GetBufferSize(struct asio *_data, LONG32 *min, LONG32 *max, LONG32 *pref,
 }
 
 STDMETHODIMP_(LONG32) CanSampleRate(struct asio *_data, DOUBLE rate) {
+  WINE_TRACE("\n");
   struct pwasio *pwasio = (struct pwasio *)_data;
 
   if (!pwasio->input || !pwasio->output)
@@ -419,6 +429,7 @@ STDMETHODIMP_(LONG32) GetSampleRate(struct asio *_data, DOUBLE *rate) {
 }
 
 STDMETHODIMP_(LONG32) SetSampleRate(struct asio *_data, DOUBLE rate) {
+  WINE_TRACE("\n");
   struct pwasio *pwasio = (struct pwasio *)_data;
 
   if (!pwasio->input || !pwasio->output)
@@ -433,6 +444,7 @@ STDMETHODIMP_(LONG32) SetSampleRate(struct asio *_data, DOUBLE rate) {
 STDMETHODIMP_(LONG32)
 GetClockSources(struct asio *_data, struct asio_clock_source *clocks,
                 LONG32 *num) {
+  WINE_TRACE("\n");
   if (!clocks || !num)
     return ASIO_ERROR_INVALID_PARAMETER;
 
@@ -454,6 +466,7 @@ GetClockSources(struct asio *_data, struct asio_clock_source *clocks,
 }
 
 STDMETHODIMP_(LONG32) SetClockSource(struct asio *_data, LONG32 idx) {
+  WINE_TRACE("\n");
   struct pwasio *pwasio = (struct pwasio *)_data;
 
   if (!pwasio->input || !pwasio->output)
@@ -490,6 +503,7 @@ GetSamplePosition(struct asio *_data, struct asio_samples *pos,
 
 STDMETHODIMP_(LONG32)
 GetChannelInfo(struct asio *_data, struct asio_channel_info *info) {
+  WINE_TRACE("\n");
   struct pwasio *pwasio = (struct pwasio *)_data;
 
   if (!pwasio->input || !pwasio->output)
@@ -520,6 +534,7 @@ STDMETHODIMP_(LONG32)
 CreateBuffers(struct asio *_data, struct asio_buffer_info *channels,
               LONG32 n_channels, LONG32 buffer_size,
               struct asio_callbacks *callbacks) {
+  WINE_TRACE("\n");
   struct pwasio *pwasio = (struct pwasio *)_data;
 
   if (!pwasio->input || !pwasio->output)
@@ -658,12 +673,14 @@ cleanup:
   pwasio_err(res, "%s", msg);
 }
 STDMETHODIMP_(LONG32) DisposeBuffers(struct asio *_data) {
+  WINE_TRACE("\n");
   struct pwasio *pwasio = (struct pwasio *)_data;
 
   if (!pwasio->input || !pwasio->output)
     pwasio_err(ASIO_ERROR_NOT_PRESENT, "no IO");
 
-  pwasio->vtbl->Stop(_data);
+  if (pwasio->running)
+    pwasio->vtbl->Stop(_data);
 
   if (pwasio->fd < 0)
     pwasio_err(ASIO_ERROR_INVALID_MODE, "no buffers");
@@ -679,7 +696,7 @@ STDMETHODIMP_(LONG32) DisposeBuffers(struct asio *_data) {
     pwasio->inputs[i].active = pwasio->outputs[i].active = false;
 
   munmap(pwasio->buffer, pwasio->fsize);
-  pwasio->buffer = nullptr;
+  pwasio->buffer = MAP_FAILED;
   close(pwasio->fd);
   pwasio->fd = -1;
 
@@ -749,7 +766,6 @@ static INT_PTR CALLBACK _panel_func(HWND hWnd, UINT uMsg, WPARAM wParam,
         cfg->reset = cfg->reset || val != cfg->priority;
         cfg->priority = val;
       }
-      break;
     case IDCANCEL:
       DestroyWindow(hWnd);
       break;
@@ -764,11 +780,6 @@ static INT_PTR CALLBACK _panel_func(HWND hWnd, UINT uMsg, WPARAM wParam,
   return TRUE;
 }
 
-#define CHK(call)                                                              \
-  do {                                                                         \
-    if ((call) != ERROR_SUCCESS)                                               \
-      goto cleanup;                                                            \
-  } while (false)
 static DWORD WINAPI _panel_thread(LPVOID p) {
   struct pwasio *pwasio = p;
 
@@ -797,6 +808,13 @@ static DWORD WINAPI _panel_thread(LPVOID p) {
 
   if (cfg.reset) {
     HKEY config = NULL;
+#define CHK(call)                                                              \
+  do {                                                                         \
+    if ((call) != ERROR_SUCCESS) {                                             \
+      WINE_WARN("failed to write configuration\n");                            \
+      goto cleanup;                                                            \
+    }                                                                          \
+  } while (false)
     CHK(RegOpenKeyExA(HKEY_CURRENT_USER, DRIVER_REG, 0, KEY_WRITE, &config));
 
     if (cfg.n_inputs != pwasio->n_inputs)
@@ -821,8 +839,8 @@ static DWORD WINAPI _panel_thread(LPVOID p) {
     if (pwasio->callbacks && pwasio->callbacks->message)
       pwasio->callbacks->message(ASIO_MESSAGE_RESET_REQUEST, 0, nullptr,
                                  nullptr);
+#undef CHK
   cleanup:
-    WARN("Failed to write configuration\n");
     if (config)
       RegCloseKey(config);
   }
@@ -831,7 +849,6 @@ static DWORD WINAPI _panel_thread(LPVOID p) {
 
   return 0;
 }
-#undef CHK
 STDMETHODIMP_(LONG32) ControlPanel(struct asio *_data) {
   struct pwasio *pwasio = (struct pwasio *)_data;
   if (pwasio->panel) {
@@ -855,6 +872,7 @@ STDMETHODIMP_(LONG32) not_impl() { return ASIO_ERROR_NOT_PRESENT; }
 static DWORD WINAPI _thread_func(LPVOID p) {
   struct thread *t = p;
   t->tid = pthread_self();
+  t->ready = true;
   t->ret = t->start(t->arg);
   return 0;
 }
@@ -871,7 +889,7 @@ static struct spa_thread *_create(void *_data, const struct spa_dict *,
   if (!t->handle)
     return nullptr;
 
-  while (!t->tid)
+  while (!t->ready)
     ;
 
   return (struct spa_thread *)t->tid;
@@ -896,38 +914,36 @@ static int _get_rt_range(void *, const struct spa_dict *, int *min, int *max) {
 }
 static int _acquire_rt(void *_data, struct spa_thread *, int priority) {
   struct pwasio *pwasio = _data;
+  int err = 0;
   if (pwasio->priority && priority == -1) {
-    priority = THREAD_PRIORITY_TIME_CRITICAL;
-    pthread_setschedparam(
+    WINE_TRACE("setting thread scheduler to SCHED_FIFO with priority %d\n",
+               pwasio->priority);
+    err = pthread_setschedparam(
         pwasio->thread.tid, SCHED_FIFO,
         &(struct sched_param){.sched_priority = pwasio->priority});
   }
-  return -!SetThreadPriority(pwasio->thread.handle, priority);
+  if (err)
+    WINE_ERR("%s\n", strerror(err));
+
+  return err;
 }
 static int _drop_rt(void *_data, struct spa_thread *) {
   struct pwasio *pwasio = _data;
-  if (pwasio->priority)
-    pthread_setschedparam(pwasio->thread.tid, SCHED_OTHER,
-                          &(struct sched_param){.sched_priority = 0});
-  return -!SetThreadPriority(pwasio->thread.handle, THREAD_PRIORITY_NORMAL);
+  int err = 0;
+  if (pwasio->priority) {
+    WINE_TRACE("setting %lu scheduler to SCHED_OTHER", pwasio->thread.tid);
+    err = pthread_setschedparam(pwasio->thread.tid, SCHED_OTHER,
+                                &(struct sched_param){.sched_priority = 0});
+  }
+  if (err)
+    WINE_ERR("%s\n", strerror(err));
+
+  return 0;
 }
 
-#define get_dword(config, key, default)                                        \
-  ({                                                                           \
-    DWORD out;                                                                 \
-    LONG err = RegQueryValueExA(config, key, 0, nullptr, (BYTE *)&out,         \
-                                &(DWORD){sizeof out});                         \
-    if (err == ERROR_FILE_NOT_FOUND)                                           \
-      err = RegSetValueExA(config, key, 0, REG_DWORD,                          \
-                           (BYTE *)&(DWORD){out = default}, sizeof out);       \
-    if (err != ERROR_SUCCESS) {                                                \
-      RegCloseKey(config);                                                     \
-      goto error_registry;                                                     \
-    }                                                                          \
-    out;                                                                       \
-  })
 HRESULT WINAPI CreateInstance(LPCLASSFACTORY _data, LPUNKNOWN outer, REFIID,
                               LPVOID *ptr) {
+  WINE_TRACE("\n");
   if (outer)
     return CLASS_E_NOAGGREGATION;
 
@@ -939,7 +955,7 @@ HRESULT WINAPI CreateInstance(LPCLASSFACTORY _data, LPUNKNOWN outer, REFIID,
   struct pwasio *pwasio = *ptr = nullptr;
   pwasio = HeapAlloc(GetProcessHeap(), 0, sizeof(*pwasio));
   if (!pwasio) {
-    ERR("Failed to allocate pwasio object\n");
+    WINE_ERR("failed to allocate pwasio object\n");
     hr = E_OUTOFMEMORY;
     goto cleanup;
   }
@@ -1007,16 +1023,31 @@ HRESULT WINAPI CreateInstance(LPCLASSFACTORY _data, LPUNKNOWN outer, REFIID,
   if (RegCreateKeyExA(HKEY_CURRENT_USER, DRIVER_REG, 0, NULL, 0,
                       KEY_WRITE | KEY_READ, NULL, &config,
                       nullptr) == ERROR_SUCCESS) {
+#define get_dword(config, key, default)                                        \
+  ({                                                                           \
+    DWORD out;                                                                 \
+    LONG err = RegQueryValueExA(config, key, 0, nullptr, (BYTE *)&out,         \
+                                &(DWORD){sizeof out});                         \
+    if (err == ERROR_FILE_NOT_FOUND)                                           \
+      err = RegSetValueExA(config, key, 0, REG_DWORD,                          \
+                           (BYTE *)&(DWORD){out = default}, sizeof out);       \
+    if (err != ERROR_SUCCESS) {                                                \
+      RegCloseKey(config);                                                     \
+      WINE_WARN("unable to read configuration for " key ", using defaults\n"); \
+      goto error_registry;                                                     \
+    }                                                                          \
+    out;                                                                       \
+  })
     pwasio->n_inputs = get_dword(config, KEY_N_INPUTS, DEFAULT_N_INPUTS);
     pwasio->n_outputs = get_dword(config, KEY_N_OUTPUTS, DEFAULT_N_OUTPUTS);
     pwasio->buffer_size = get_dword(config, KEY_BUFSIZE, DEFAULT_BUFSIZE);
     pwasio->sample_rate = get_dword(config, KEY_SMPRATE, DEFAULT_SMPRATE);
     pwasio->autoconnect = get_dword(config, KEY_AUTOCON, DEFAULT_AUTOCON);
     pwasio->priority = get_dword(config, KEY_PRIORITY, DEFAULT_PRIORITY);
+#undef get_dword
     RegCloseKey(config);
   } else {
   error_registry:
-    WARN("Unable to read configuration, using defaults\n");
     pwasio->n_inputs = DEFAULT_N_INPUTS;
     pwasio->n_outputs = DEFAULT_N_OUTPUTS;
     pwasio->buffer_size = DEFAULT_BUFSIZE;
@@ -1025,27 +1056,28 @@ HRESULT WINAPI CreateInstance(LPCLASSFACTORY _data, LPUNKNOWN outer, REFIID,
     pwasio->priority = DEFAULT_PRIORITY;
   }
 
-  TRACE("Starting pwasio\n");
-  SetPriorityClass(GetCurrentProcess(), REALTIME_PRIORITY_CLASS);
+  WINE_TRACE("starting pwasio\n");
   if (pwasio->priority) {
     struct rlimit rl;
+    WINE_TRACE("setting host scheduler to SCHED_FIFO with priority %d\n",
+               pwasio->priority - 1);
     if (getrlimit(RLIMIT_RTPRIO, &rl) || rl.rlim_max < 1 ||
         !(rl.rlim_cur = pwasio->priority) || setrlimit(RLIMIT_RTPRIO, &rl) ||
         sched_setscheduler(
             0, SCHED_FIFO,
             &(struct sched_param){.sched_priority = pwasio->priority - 1})) {
-      ERR("Unable to get realtime privileges\n");
+      WINE_ERR("unable to get realtime privileges: %s\n", strerror(errno));
       hr = E_UNEXPECTED;
       goto cleanup;
     }
   }
 
   pw_init(nullptr, nullptr);
-  TRACE("Compiled with libpipewire-%s\n", pw_get_headers_version());
-  TRACE("Linked with libpipewire-%s\n", pw_get_library_version());
+  WINE_TRACE("compiled with libpipewire-%s\n", pw_get_headers_version());
+  WINE_TRACE("linked with libpipewire-%s\n", pw_get_library_version());
 
   if (!(pwasio->loop = pw_data_loop_new(nullptr))) {
-    ERR("Failed to create PipeWire loop\n");
+    WINE_ERR("failed to create PipeWire loop\n");
     hr = E_UNEXPECTED;
     goto cleanup;
   }

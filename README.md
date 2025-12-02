@@ -1,10 +1,10 @@
 # pwasio
 
-pwasio provides an ASIO to PipeWire for Wine. ASIO is the most common Windows
-low-latency audio driver, so is commonly used in audio workstation programs.
-Requires at least PipeWire 1.5.0 for shared audio buffers, which at the time
-of writing needs to be built from source. Current Steam Runtime (sniper)
-includes PipeWire 0.3.65, so running there will result in linking errors.
+pwasio is an ASIO driver for Wine with a PipeWire backend. ASIO is commonly used
+in Windows audio workstation programs. Works in current Steam Runtime (sniper).
+Does not work in the latest release version of PipeWire (1.4.9) due to changes
+in audio buffer negotiation logic since version 0.3.65 included in the Steam
+Runtime. Patches introduced in PipeWire 1.6 should fix it.
 
 ### Building
 
@@ -13,6 +13,14 @@ Do the following to build for 64-bit Wine.
 ```sh
 make
 ```
+
+Logging is enabled in debug builds, using
+
+```sh
+DEBUG=true make
+```
+
+and are enabled through the wine debugging channel `pwasio`.
 
 ### Installing
 
