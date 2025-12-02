@@ -52,7 +52,7 @@ WINEPREFIX=/path/to/prefix regsvr32 pwasio.dll
 
 This project comes solely out of frustration of being unable to run Ableton Live
 in my current PipeWire/Proton based Arch Linux setup. This project would not at
-all be possible without the skeleton laid out in the original WineASIO project,
+all be possible without the skeleton laid out in the original WineASIO project.
 Despite being a complete refactor, I consider pwasio a derivative work of
 WineASIO and as such all original authors from that have been kept here.
 
@@ -87,6 +87,7 @@ value of 2).
 ### Change Log
 
 #### 0.0.1
+* 02/12/2025: Improved logging (GG)
 * 26/10/2025: Driver can now run in realtime thread (GG)
 * 11/10/2025: Add control panel and persistent configuration (GG)
 * 10/10/2025: Use decoupled input and output streams (GG)
