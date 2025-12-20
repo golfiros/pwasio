@@ -88,6 +88,7 @@ in some hosts, so increase it accordingly if necessary.
 ### Change Log
 
 #### 0.0.1
+* 20/12/2025: Get timestamp in `input_process` (GG)
 * 02/12/2025: Improved logging (GG)
 * 26/10/2025: Driver can now run in realtime thread (GG)
 * 11/10/2025: Add control panel and persistent configuration (GG)
