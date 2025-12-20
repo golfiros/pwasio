@@ -99,10 +99,9 @@ struct pwasio {
   struct thread thread;
   struct pw_data_loop *loop;
   struct pw_stream *input, *output;
-  struct pw_time time;
   struct pw_buffer *input_buf[2], *output_buf[2];
   struct port inputs[MAX_PORTS], outputs[MAX_PORTS];
-  size_t idx;
+  size_t idx, pos, nsec;
 
   int fd;
   size_t fsize;
@@ -188,7 +187,14 @@ static int _swap_buffers(struct spa_loop *, bool, uint32_t, const void *,
 static void _input_process(void *_data) {
   struct pwasio *pwasio = _data;
 
-  pw_stream_get_time_n(pwasio->input, &pwasio->time, sizeof pwasio->time);
+  pwasio->pos += pwasio->buffer_size;
+  struct timespec now;
+#ifdef CLOCK_MONOTONIC_RAW
+  clock_gettime(CLOCK_MONOTONIC_RAW, &now);
+#else
+  clock_gettime(CLOCK_MONOTONIC, &now);
+#endif
+  pwasio->nsec = 1000000000 * now.tv_sec + now.tv_nsec;
 
   struct pw_buffer *buf;
   if ((buf = pw_stream_dequeue_buffer(pwasio->input)))
@@ -380,7 +386,7 @@ STDMETHODIMP_(LONG) GetLatencies(struct asio *_data, LONG *in, LONG *out) {
     pwasio_err(ASIO_ERROR_NOT_PRESENT, "no IO");
 
   *in = pwasio->buffer_size;
-  *out = 0;
+  *out = pwasio->buffer_size;
 
   return ASIO_ERROR_OK;
 }
@@ -489,12 +495,12 @@ GetSamplePosition(struct asio *_data, struct asio_samples *pos,
     pwasio_err(ASIO_ERROR_NOT_PRESENT, "no IO");
 
   *pos = (typeof(*pos)){
-      .lo = (uint64_t)pwasio->time.ticks,
-      .hi = ((uint64_t)pwasio->time.ticks) >> 32,
+      .lo = pwasio->pos,
+      .hi = pwasio->pos >> 32,
   };
   *nsec = (typeof(*nsec)){
-      .lo = (uint64_t)pwasio->time.now,
-      .hi = ((uint64_t)pwasio->time.now) >> 32,
+      .lo = pwasio->nsec,
+      .hi = pwasio->nsec >> 32,
   };
 
   return ASIO_ERROR_OK;
