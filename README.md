@@ -82,7 +82,8 @@ will give the host and the driver realtime scheduling, which may be necessary to
 achieve lower latencies. The user must have realtime privileges. The value sets
 the `SCHED_FIFO` priority for the driver, and the host audio thread receives a
 priority of one less than what is configured (hence the minimum value nonzero
-value of 2).
+value of 2). It has been found that a small nonzero value can induce instability
+in some hosts, so increase it accordingly if necessary.
 
 ### Change Log
 
