@@ -77,13 +77,14 @@ the specific configuration. Setting these to values not supported by your
 hardware might incur overhead.
 
 #### RT priority
-Both to zero which gives default thread scheduling. Setting the respective
-fields to > 0 will give the driver and host realtime scheduling, which may be
-necessary to achieve lower latencies. The user must have realtime privileges.
-We use `SCHED_FIFO` scheduling with the given priority. For reference, the
-default PipeWire configuration at the time of writing would use a value of 88 in
-the "driver" RT priority. It has been found that a small nonzero value for host
-priority can induce instability, so increase it accordingly if necessary.
+Defaults both to zero which gives default thread scheduling. Setting the
+respective fields to > 0 will give the driver and host realtime scheduling,
+which may be necessary to achieve lower latencies. The user must have realtime
+privileges. We use `SCHED_FIFO` scheduling with the given priority. For
+reference, the default PipeWire configuration at the time of writing would use a
+value of 88 in the "driver" RT priority. It has been found that a small nonzero
+value for host priority can induce instability, so increase it accordingly if
+necessary.
 
 ### Change Log
 
