@@ -59,6 +59,7 @@ WINE_DEFAULT_DEBUG_CHANNEL(pwasio);
 #define KEY_SMPRATE "sample_rate"
 #define KEY_AUTOCON "autoconnect"
 #define KEY_PRIORITY "priority"
+#define KEY_HOST_PRIORITY "host_priority"
 
 #define DEFAULT_N_INPUTS 2
 #define DEFAULT_N_OUTPUTS 2
@@ -92,7 +93,7 @@ struct pwasio {
   char name[MAX_NAME];
   size_t n_inputs, n_outputs, buffer_size, sample_rate;
   bool autoconnect;
-  int priority;
+  int priority, host_priority;
 
   struct spa_thread_utils thread_utils;
   struct thread thread;
@@ -161,7 +162,7 @@ STDMETHODIMP_(ULONG32) Release(struct asio *_data) {
   if (pwasio->loop)
     pw_data_loop_destroy(pwasio->loop);
 
-  if (pwasio->priority) {
+  if (pwasio->host_priority) {
     WINE_TRACE("setting host scheduler to SCHED_OTHER\n");
     pthread_setschedparam(pwasio->thread.host, SCHED_OTHER,
                           &(struct sched_param){.sched_priority = 0});
@@ -184,7 +185,6 @@ static int _swap_buffers(struct spa_loop *, bool, uint32_t, const void *,
   if (pw_data_loop_in_thread(pwasio->loop))
     pwasio->callbacks->swap_buffers(pwasio->idx, true);
   pwasio->idx = !pwasio->idx;
-  pw_stream_trigger_process(pwasio->output);
   return 0;
 }
 static void _input_process(void *_data) {
@@ -290,6 +290,8 @@ STDMETHODIMP_(LONG32) Init(struct asio *_data, void *) {
     pwasio->sample_rate = get_dword(config, KEY_SMPRATE, DEFAULT_SMPRATE);
     pwasio->autoconnect = get_dword(config, KEY_AUTOCON, DEFAULT_AUTOCON);
     pwasio->priority = get_dword(config, KEY_PRIORITY, DEFAULT_PRIORITY);
+    pwasio->host_priority =
+        get_dword(config, KEY_HOST_PRIORITY, DEFAULT_PRIORITY);
 #undef get_dword
     RegCloseKey(config);
   } else {
@@ -300,21 +302,25 @@ STDMETHODIMP_(LONG32) Init(struct asio *_data, void *) {
     pwasio->sample_rate = DEFAULT_SMPRATE;
     pwasio->autoconnect = DEFAULT_AUTOCON;
     pwasio->priority = DEFAULT_PRIORITY;
+    pwasio->host_priority = DEFAULT_PRIORITY;
   }
 
   WINE_TRACE("starting pwasio\n");
   pwasio->thread.host = pthread_self();
-  if (pwasio->priority) {
+  if (pwasio->priority || pwasio->host_priority) {
     struct rlimit rl;
-    WINE_TRACE("setting host scheduler to SCHED_FIFO with priority %d\n",
-               pwasio->priority - 1);
     if (getrlimit(RLIMIT_RTPRIO, &rl) || rl.rlim_max < 1 ||
-        !(rl.rlim_cur = pwasio->priority) || setrlimit(RLIMIT_RTPRIO, &rl) ||
-        pthread_setschedparam(
-            pwasio->thread.host, SCHED_FIFO,
-            &(struct sched_param){.sched_priority = pwasio->priority - 1})) {
+        !(rl.rlim_cur = SPA_MAX(pwasio->priority, pwasio->host_priority)) ||
+        setrlimit(RLIMIT_RTPRIO, &rl))
       pwasio_err(ASIO_ERROR_INVALID_MODE,
                  "unable to get realtime privileges: %s\n", strerror(errno));
+    if (pwasio->host_priority) {
+      WINE_TRACE("setting host scheduler to SCHED_FIFO with priority %d\n",
+                 pwasio->host_priority);
+      if (pthread_setschedparam(
+              pwasio->thread.host, SCHED_FIFO,
+              &(struct sched_param){.sched_priority = pwasio->priority - 1}))
+        WINE_ERR("unable to set host realtime priority\n");
     }
   }
 
@@ -661,8 +667,7 @@ CreateBuffers(struct asio *_data, struct asio_buffer_info *channels,
       info->buf[b] = pwasio->buffer + p->offset[b];
   }
 
-  enum pw_stream_flags flags =
-      PW_STREAM_FLAG_ALLOC_BUFFERS | PW_STREAM_FLAG_RT_PROCESS;
+  enum pw_stream_flags flags = PW_STREAM_FLAG_ALLOC_BUFFERS;
   if (pwasio->autoconnect)
     flags |= PW_STREAM_FLAG_AUTOCONNECT;
   char buf[1024];
@@ -690,7 +695,6 @@ CreateBuffers(struct asio *_data, struct asio_buffer_info *channels,
       goto cleanup;
     }
   }
-  // flags |= PW_STREAM_FLAG_TRIGGER;
   {
     struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buf, sizeof buf);
     const struct spa_pod *params[] = {
@@ -772,7 +776,7 @@ STDMETHODIMP_(LONG32) DisposeBuffers(struct asio *_data) {
 struct cfg {
   size_t n_inputs, n_outputs, buffer_size, sample_rate;
   bool autoconnect;
-  int priority;
+  int priority, host_priority;
   bool reset;
 };
 static INT_PTR CALLBACK _panel_func(HWND hWnd, UINT uMsg, WPARAM wParam,
@@ -790,6 +794,7 @@ static INT_PTR CALLBACK _panel_func(HWND hWnd, UINT uMsg, WPARAM wParam,
     CheckDlgButton(hWnd, IDC_AUTOCON,
                    cfg->autoconnect ? BST_CHECKED : BST_UNCHECKED);
     SetDlgItemInt(hWnd, IDE_PRIORITY, cfg->priority, false);
+    SetDlgItemInt(hWnd, IDE_HOST_PRIORITY, cfg->host_priority, false);
     break;
   case WM_COMMAND:
     switch (LOWORD(wParam)) {
@@ -828,9 +833,15 @@ static INT_PTR CALLBACK _panel_func(HWND hWnd, UINT uMsg, WPARAM wParam,
       cfg->autoconnect = val;
 
       val = GetDlgItemInt(hWnd, IDE_PRIORITY, &conv, true);
-      if (conv && val >= 0 && val != 1) {
+      if (conv && val >= 0) {
         cfg->reset = cfg->reset || val != cfg->priority;
         cfg->priority = val;
+      }
+
+      val = GetDlgItemInt(hWnd, IDE_HOST_PRIORITY, &conv, true);
+      if (conv && val >= 0) {
+        cfg->reset = cfg->reset || val != cfg->host_priority;
+        cfg->host_priority = val;
       }
     case IDCANCEL:
       DestroyWindow(hWnd);
@@ -856,6 +867,7 @@ static DWORD WINAPI _panel_thread(LPVOID p) {
       .sample_rate = pwasio->sample_rate,
       .autoconnect = pwasio->autoconnect,
       .priority = pwasio->priority,
+      .host_priority = pwasio->host_priority,
   };
   if (!(pwasio->dialog = CreateDialogParamA(pwasio->hinst,
                                             (LPCSTR)MAKEINTRESOURCE(IDD_PANEL),
@@ -901,6 +913,9 @@ static DWORD WINAPI _panel_thread(LPVOID p) {
     if (cfg.priority != pwasio->priority)
       CHK(RegSetValueExA(config, KEY_PRIORITY, 0, REG_DWORD,
                          (BYTE *)&(DWORD){cfg.priority}, sizeof(DWORD)));
+    if (cfg.host_priority != pwasio->host_priority)
+      CHK(RegSetValueExA(config, KEY_HOST_PRIORITY, 0, REG_DWORD,
+                         (BYTE *)&(DWORD){cfg.host_priority}, sizeof(DWORD)));
 
     if (pwasio->callbacks && pwasio->callbacks->message)
       pwasio->callbacks->message(ASIO_MESSAGE_RESET_REQUEST, 0, nullptr,
@@ -980,7 +995,7 @@ static int _acquire_rt(void *_data, struct spa_thread *, int priority) {
   struct pwasio *pwasio = _data;
   int err = 0;
   if (pwasio->priority && priority == -1) {
-    WINE_TRACE("setting thread scheduler to SCHED_FIFO with priority %d\n",
+    WINE_TRACE("setting driver scheduler to SCHED_FIFO with priority %d\n",
                pwasio->priority);
     if ((err = pthread_setschedparam(
              pwasio->thread.tid, SCHED_FIFO,
@@ -992,7 +1007,7 @@ static int _acquire_rt(void *_data, struct spa_thread *, int priority) {
 static int _drop_rt(void *_data, struct spa_thread *) {
   struct pwasio *pwasio = _data;
   if (pwasio->priority) {
-    WINE_TRACE("setting thread scheduler to SCHED_OTHER\n");
+    WINE_TRACE("setting driver scheduler to SCHED_OTHER\n");
     int err;
     if ((err =
              pthread_setschedparam(pwasio->thread.tid, SCHED_OTHER,

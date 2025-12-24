@@ -77,16 +77,18 @@ the specific configuration. Setting these to values not supported by your
 hardware might incur overhead.
 
 #### RT priority
-Defaults to zero which gives default thread scheduling. Setting this to >= 2
-will give the host and the driver realtime scheduling, which may be necessary to
-achieve lower latencies. The user must have realtime privileges. The value sets
-the `SCHED_FIFO` priority for the driver, and the host audio thread receives a
-priority of one less than what is configured (hence the minimum value nonzero
-value of 2). It has been found that a small nonzero value can induce instability
-in some hosts, so increase it accordingly if necessary.
+Both to zero which gives default thread scheduling. Setting the respective
+fields to > 0 will give the driver and host realtime scheduling, which may be
+necessary to achieve lower latencies. The user must have realtime privileges.
+We use `SCHED_FIFO` scheduling with the given priority. For reference, the
+default PipeWire configuration at the time of writing would use a value of 88 in
+the "driver" RT priority. It has been found that a small nonzero value for host
+priority can induce instability, so increase it accordingly if necessary.
 
 ### Change Log
 
+#### 0.0.2
+* 24/12/2025: Separate driver and host realtime priorities (GG)
 #### 0.0.1
 * 20/12/2025: Get timestamp in `input_process` (GG)
 * 02/12/2025: Improved logging (GG)
