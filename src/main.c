@@ -48,7 +48,7 @@ static HRESULT WINAPI LockServer(LPCLASSFACTORY, BOOL) {
 
 HRESULT WINAPI DllGetClassObject(REFCLSID rclsid, REFIID riid, LPVOID *ppvObj) {
   WINE_TRACE("\n");
-  if (ppvObj == NULL || !IsEqualIID(riid, &IID_IClassFactory))
+  if (ppvObj == nullptr || !IsEqualIID(riid, &IID_IClassFactory))
     return E_INVALIDARG;
   if (!IsEqualGUID(rclsid, &class_id))
     return CLASS_E_CLASSNOTAVAILABLE;
@@ -93,7 +93,7 @@ BOOL WINAPI DllMain(HINSTANCE hinst, DWORD reason, LPVOID) {
 HRESULT WINAPI DllRegisterServer(void) {
   WINE_TRACE("\n");
   LONG err = ERROR_SUCCESS;
-  HKEY class = NULL, clsid = NULL, ips32 = NULL, driver = NULL;
+  HKEY class = nullptr, clsid = nullptr, ips32 = nullptr, driver = nullptr;
 #define CHK(call)                                                              \
   do {                                                                         \
     err = (call);                                                              \
@@ -103,26 +103,27 @@ HRESULT WINAPI DllRegisterServer(void) {
     }                                                                          \
   } while (false)
 
-  CHK(RegCreateKeyExA(HKEY_CLASSES_ROOT, "CLSID", 0, NULL, 0, KEY_WRITE, NULL,
-                      &class, NULL));
+  CHK(RegCreateKeyExA(HKEY_CLASSES_ROOT, "CLSID", 0, nullptr, 0, KEY_WRITE,
+                      nullptr, &class, nullptr));
 
   WCHAR wstr[39];
   StringFromGUID2(&class_id, wstr, 39);
-  CHK(RegCreateKeyExW(class, wstr, 0, NULL, 0, KEY_WRITE, NULL, &clsid, NULL));
+  CHK(RegCreateKeyExW(class, wstr, 0, nullptr, 0, KEY_WRITE, nullptr, &clsid,
+                      nullptr));
 
-  CHK(RegSetValueExA(clsid, NULL, 0, REG_STR("pwasio Object")));
+  CHK(RegSetValueExA(clsid, nullptr, 0, REG_STR("pwasio Object")));
 
-  CHK(RegCreateKeyExA(clsid, "InProcServer32", 0, NULL, 0, KEY_WRITE, NULL,
-                      &ips32, NULL));
+  CHK(RegCreateKeyExA(clsid, "InProcServer32", 0, nullptr, 0, KEY_WRITE,
+                      nullptr, &ips32, nullptr));
 
-  CHK(RegSetValueExA(ips32, NULL, 0, REG_STR(LIB_NAME)));
+  CHK(RegSetValueExA(ips32, nullptr, 0, REG_STR(LIB_NAME)));
   CHK(RegSetValueExA(ips32, "ThreadingModel", 0, REG_STR("Apartment")));
 
-  CHK(RegCreateKeyExA(HKEY_LOCAL_MACHINE, DRIVER_REG, 0, NULL, 0, KEY_WRITE,
-                      NULL, &driver, 0));
+  CHK(RegCreateKeyExA(HKEY_LOCAL_MACHINE, DRIVER_REG, 0, nullptr, 0, KEY_WRITE,
+                      nullptr, &driver, 0));
 
   char str[39];
-  WideCharToMultiByte(CP_ACP, 0, wstr, -1, str, sizeof str, NULL, NULL);
+  WideCharToMultiByte(CP_ACP, 0, wstr, -1, str, sizeof str, nullptr, nullptr);
   CHK(RegSetValueExA(driver, "CLSID", 0, REG_STR(str)));
   CHK(RegSetValueExA(driver, "Description", 0, REG_STR("pwasio Driver")));
 #undef CHK
@@ -143,7 +144,7 @@ cleanup:
 HRESULT WINAPI DllUnregisterServer(void) {
   WINE_TRACE("\n");
   LONG err = ERROR_SUCCESS;
-  HKEY key = NULL;
+  HKEY key = nullptr;
 #define CHK(call)                                                              \
   do {                                                                         \
     err = (call);                                                              \

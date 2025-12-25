@@ -122,7 +122,7 @@ STDMETHODIMP QueryInterface(struct asio *_data, REFIID riid, PVOID *out) {
   WINE_TRACE("\n");
   struct pwasio *pwasio = (struct pwasio *)_data;
 
-  if (out == NULL)
+  if (out == nullptr)
     return E_INVALIDARG;
 
   if (IsEqualIID(&class_id, riid)) {
@@ -265,9 +265,9 @@ STDMETHODIMP_(LONG32) Init(struct asio *_data, void *) {
   WINE_TRACE("\n");
   struct pwasio *pwasio = (struct pwasio *)_data;
 
-  HKEY config = NULL;
-  if (RegCreateKeyExA(HKEY_CURRENT_USER, DRIVER_REG, 0, NULL, 0,
-                      KEY_WRITE | KEY_READ, NULL, &config,
+  HKEY config = nullptr;
+  if (RegCreateKeyExA(HKEY_CURRENT_USER, DRIVER_REG, 0, nullptr, 0,
+                      KEY_WRITE | KEY_READ, nullptr, &config,
                       nullptr) == ERROR_SUCCESS) {
 #define get_dword(config, key, default)                                        \
   ({                                                                           \
@@ -331,8 +331,8 @@ STDMETHODIMP_(LONG32) Init(struct asio *_data, void *) {
 
   WCHAR path[MAX_PATH];
   GetModuleFileNameW(0, path, MAX_PATH);
-  WideCharToMultiByte(CP_ACP, WC_SEPCHARS, StrRChrW(path, NULL, '\\') + 1, -1,
-                      pwasio->name, sizeof pwasio->name, NULL, NULL);
+  WideCharToMultiByte(CP_ACP, WC_SEPCHARS, StrRChrW(path, nullptr, '\\') + 1,
+                      -1, pwasio->name, sizeof pwasio->name, nullptr, nullptr);
 
   char rate_str[8], bufsize_str[8];
   sprintf(rate_str, "%lu", pwasio->sample_rate);
@@ -869,15 +869,15 @@ static DWORD WINAPI _panel_thread(LPVOID p) {
       .priority = pwasio->priority,
       .host_priority = pwasio->host_priority,
   };
-  if (!(pwasio->dialog = CreateDialogParamA(pwasio->hinst,
-                                            (LPCSTR)MAKEINTRESOURCE(IDD_PANEL),
-                                            NULL, _panel_func, (LPARAM)&cfg)))
+  if (!(pwasio->dialog = CreateDialogParamA(
+            pwasio->hinst, (LPCSTR)MAKEINTRESOURCE(IDD_PANEL), nullptr,
+            _panel_func, (LPARAM)&cfg)))
     return -1;
 
   ShowWindow(pwasio->dialog, SW_SHOW);
 
   MSG msg;
-  while (GetMessageA(&msg, NULL, 0, 0) > 0) {
+  while (GetMessageA(&msg, nullptr, 0, 0) > 0) {
     if (!IsDialogMessageA(pwasio->dialog, &msg)) {
       TranslateMessage(&msg);
       DispatchMessageA(&msg);
@@ -885,7 +885,7 @@ static DWORD WINAPI _panel_thread(LPVOID p) {
   }
 
   if (cfg.reset) {
-    HKEY config = NULL;
+    HKEY config = nullptr;
 #define CHK(call)                                                              \
   do {                                                                         \
     if ((call) != ERROR_SUCCESS) {                                             \
@@ -940,7 +940,7 @@ STDMETHODIMP_(LONG32) ControlPanel(struct asio *_data) {
     pwasio->panel = nullptr;
   }
 
-  HANDLE t = CreateThread(NULL, 0, _panel_thread, pwasio, 0, nullptr);
+  HANDLE t = CreateThread(nullptr, 0, _panel_thread, pwasio, 0, nullptr);
   if (!t)
     return ASIO_ERROR_NOT_PRESENT;
 
@@ -964,7 +964,7 @@ static struct spa_thread *_create(void *_data, const struct spa_dict *,
 
   t->start = start;
   t->arg = arg;
-  t->handle = CreateThread(NULL, 0, _thread_func, t, 0, &t->thread_id);
+  t->handle = CreateThread(nullptr, 0, _thread_func, t, 0, &t->thread_id);
   if (!t->handle)
     return nullptr;
 
