@@ -179,14 +179,6 @@ STDMETHODIMP_(ULONG32) Release(struct asio *_data) {
 /* Paranoid driver developers should assume that the application will access
  * buffer 0 as soon as bufferSwitch(0) is called, up until bufferSwitch(1)
  * returns (and vice-versa). */
-static int _swap_buffers(struct spa_loop *, bool, uint32_t, const void *,
-                         size_t, void *_data) {
-  struct pwasio *pwasio = _data;
-  if (pw_data_loop_in_thread(pwasio->loop))
-    pwasio->callbacks->swap_buffers(pwasio->idx, true);
-  pwasio->idx = !pwasio->idx;
-  return 0;
-}
 static void _input_process(void *_data) {
   struct pwasio *pwasio = _data;
 
@@ -203,8 +195,10 @@ static void _input_process(void *_data) {
   if ((buf = pw_stream_dequeue_buffer(pwasio->input)))
     pw_stream_queue_buffer(pwasio->input, buf);
 
-  pw_data_loop_invoke(pwasio->loop, _swap_buffers, SPA_ID_INVALID, nullptr, 0,
-                      false, pwasio);
+  if (pw_data_loop_in_thread(pwasio->loop)) {
+    pwasio->callbacks->swap_buffers(pwasio->idx, true);
+    pwasio->idx = !pwasio->idx;
+  }
 }
 static void _input_add_buffer(void *_data, struct pw_buffer *buf) {
   struct pwasio *pwasio = _data;
