@@ -31,6 +31,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 #include <pipewire/pipewire.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <sys/mman.h>
 #include <sys/resource.h>
 
@@ -76,12 +77,77 @@ struct port {
 struct thread {
   HANDLE handle;
   DWORD thread_id;
-  pthread_t host, tid;
-  volatile bool ready;
+  pthread_t tid;
+  int priority;
+  atomic_bool ready;
 
   void *(*start)(void *);
   void *arg, *ret;
 };
+
+static DWORD WINAPI _thread_func(LPVOID p) {
+  struct thread *t = p;
+  t->tid = pthread_self();
+  atomic_store_explicit(&t->ready, true, memory_order_release);
+  t->ret = t->start(t->arg);
+  return 0;
+}
+static struct spa_thread *_create(void *_data, const struct spa_dict *,
+                                  void *(*start)(void *), void *arg) {
+  struct thread *t = _data;
+
+  t->start = start;
+  t->arg = arg;
+  t->handle = CreateThread(nullptr, 0, _thread_func, t, 0, &t->thread_id);
+  if (!t->handle)
+    return nullptr;
+
+  while (!atomic_load_explicit(&t->ready, memory_order_acquire))
+    sched_yield();
+
+  return (struct spa_thread *)t->tid;
+}
+static int _join(void *_data, struct spa_thread *, void **retval) {
+  struct thread *t = _data;
+  if (!t->handle)
+    return -1;
+
+  DWORD result = WaitForSingleObject(t->handle, INFINITE);
+  if (retval)
+    *retval = t->ret;
+
+  CloseHandle(t->handle);
+  return (result == WAIT_OBJECT_0) ? 0 : -1;
+}
+static int _get_rt_range(void *, const struct spa_dict *, int *min, int *max) {
+  *min = THREAD_PRIORITY_NORMAL;
+  *max = THREAD_PRIORITY_TIME_CRITICAL;
+  return 0;
+}
+static int _acquire_rt(void *_data, struct spa_thread *, int priority) {
+  struct thread *t = _data;
+  int err = 0;
+  if (t->priority && priority == -1) {
+    WINE_TRACE("setting driver scheduler to SCHED_FIFO with priority %d\n",
+               t->priority);
+    if ((err = pthread_setschedparam(
+             t->tid, SCHED_FIFO,
+             &(struct sched_param){.sched_priority = t->priority})))
+      WINE_ERR("%s\n", strerror(err));
+  }
+  return err;
+}
+static int _drop_rt(void *_data, struct spa_thread *) {
+  struct thread *t = _data;
+  if (t->priority) {
+    WINE_TRACE("setting driver scheduler to SCHED_OTHER\n");
+    int err;
+    if ((err = pthread_setschedparam(
+             t->tid, SCHED_OTHER, &(struct sched_param){.sched_priority = 0})))
+      WINE_ERR("%s\n", strerror(err));
+  }
+  return 0;
+}
 
 struct pwasio {
   const struct asioVtbl *vtbl;
@@ -93,7 +159,8 @@ struct pwasio {
   char name[MAX_NAME];
   size_t n_inputs, n_outputs, buffer_size, sample_rate;
   bool autoconnect;
-  int priority, host_priority;
+  pthread_t host_tid;
+  int host_priority;
 
   struct spa_thread_utils thread_utils;
   struct thread thread;
@@ -164,7 +231,7 @@ STDMETHODIMP_(ULONG32) Release(struct asio *_data) {
 
   if (pwasio->host_priority) {
     WINE_TRACE("setting host scheduler to SCHED_OTHER\n");
-    pthread_setschedparam(pwasio->thread.host, SCHED_OTHER,
+    pthread_setschedparam(pwasio->host_tid, SCHED_OTHER,
                           &(struct sched_param){.sched_priority = 0});
   }
 
@@ -283,7 +350,7 @@ STDMETHODIMP_(LONG32) Init(struct asio *_data, void *) {
     pwasio->buffer_size = get_dword(config, KEY_BUFSIZE, DEFAULT_BUFSIZE);
     pwasio->sample_rate = get_dword(config, KEY_SMPRATE, DEFAULT_SMPRATE);
     pwasio->autoconnect = get_dword(config, KEY_AUTOCON, DEFAULT_AUTOCON);
-    pwasio->priority = get_dword(config, KEY_PRIORITY, DEFAULT_PRIORITY);
+    pwasio->thread.priority = get_dword(config, KEY_PRIORITY, DEFAULT_PRIORITY);
     pwasio->host_priority =
         get_dword(config, KEY_HOST_PRIORITY, DEFAULT_PRIORITY);
 #undef get_dword
@@ -295,16 +362,17 @@ STDMETHODIMP_(LONG32) Init(struct asio *_data, void *) {
     pwasio->buffer_size = DEFAULT_BUFSIZE;
     pwasio->sample_rate = DEFAULT_SMPRATE;
     pwasio->autoconnect = DEFAULT_AUTOCON;
-    pwasio->priority = DEFAULT_PRIORITY;
+    pwasio->thread.priority = DEFAULT_PRIORITY;
     pwasio->host_priority = DEFAULT_PRIORITY;
   }
 
   WINE_TRACE("starting pwasio\n");
-  pwasio->thread.host = pthread_self();
-  if (pwasio->priority || pwasio->host_priority) {
+  pwasio->host_tid = pthread_self();
+  if (pwasio->thread.priority || pwasio->host_priority) {
     struct rlimit rl;
     if (getrlimit(RLIMIT_RTPRIO, &rl) || rl.rlim_max < 1 ||
-        !(rl.rlim_cur = SPA_MAX(pwasio->priority, pwasio->host_priority)) ||
+        !(rl.rlim_cur =
+              SPA_MAX(pwasio->thread.priority, pwasio->host_priority)) ||
         setrlimit(RLIMIT_RTPRIO, &rl))
       pwasio_err(ASIO_ERROR_INVALID_MODE,
                  "unable to get realtime privileges: %s\n", strerror(errno));
@@ -312,8 +380,8 @@ STDMETHODIMP_(LONG32) Init(struct asio *_data, void *) {
       WINE_TRACE("setting host scheduler to SCHED_FIFO with priority %d\n",
                  pwasio->host_priority);
       if (pthread_setschedparam(
-              pwasio->thread.host, SCHED_FIFO,
-              &(struct sched_param){.sched_priority = pwasio->priority - 1}))
+              pwasio->host_tid, SCHED_FIFO,
+              &(struct sched_param){.sched_priority = pwasio->host_priority}))
         WINE_ERR("unable to set host realtime priority\n");
     }
   }
@@ -321,6 +389,16 @@ STDMETHODIMP_(LONG32) Init(struct asio *_data, void *) {
   if (!(pwasio->loop = pw_data_loop_new(nullptr)))
     pwasio_err(ASIO_ERROR_NO_MEMORY, "failed to create PipeWire loop\n");
 
+  static const struct spa_thread_utils_methods thread_utils_methods = {
+      .create = _create,
+      .join = _join,
+      .get_rt_range = _get_rt_range,
+      .acquire_rt = _acquire_rt,
+      .drop_rt = _drop_rt,
+  };
+  pwasio->thread_utils.iface = SPA_INTERFACE_INIT(
+      SPA_TYPE_INTERFACE_ThreadUtils, SPA_VERSION_THREAD_UTILS,
+      &thread_utils_methods, &pwasio->thread);
   pw_data_loop_set_thread_utils(pwasio->loop, &pwasio->thread_utils);
 
   WCHAR path[MAX_PATH];
@@ -860,7 +938,7 @@ static DWORD WINAPI _panel_thread(LPVOID p) {
       .buffer_size = pwasio->buffer_size,
       .sample_rate = pwasio->sample_rate,
       .autoconnect = pwasio->autoconnect,
-      .priority = pwasio->priority,
+      .priority = pwasio->thread.priority,
       .host_priority = pwasio->host_priority,
   };
   if (!(pwasio->dialog = CreateDialogParamA(
@@ -904,7 +982,7 @@ static DWORD WINAPI _panel_thread(LPVOID p) {
     if (cfg.autoconnect != pwasio->autoconnect)
       CHK(RegSetValueExA(config, KEY_AUTOCON, 0, REG_DWORD,
                          (BYTE *)&(DWORD){cfg.autoconnect}, sizeof(DWORD)));
-    if (cfg.priority != pwasio->priority)
+    if (cfg.priority != pwasio->thread.priority)
       CHK(RegSetValueExA(config, KEY_PRIORITY, 0, REG_DWORD,
                          (BYTE *)&(DWORD){cfg.priority}, sizeof(DWORD)));
     if (cfg.host_priority != pwasio->host_priority)
@@ -943,73 +1021,6 @@ STDMETHODIMP_(LONG32) ControlPanel(struct asio *_data) {
   return ASIO_ERROR_OK;
 }
 STDMETHODIMP_(LONG32) not_impl() { return ASIO_ERROR_NOT_PRESENT; }
-
-static DWORD WINAPI _thread_func(LPVOID p) {
-  struct thread *t = p;
-  t->tid = pthread_self();
-  t->ready = true;
-  t->ret = t->start(t->arg);
-  return 0;
-}
-static struct spa_thread *_create(void *_data, const struct spa_dict *,
-                                  void *(*start)(void *), void *arg) {
-  struct pwasio *pwasio = _data;
-  struct thread *t = &pwasio->thread;
-
-  t->start = start;
-  t->arg = arg;
-  t->handle = CreateThread(nullptr, 0, _thread_func, t, 0, &t->thread_id);
-  if (!t->handle)
-    return nullptr;
-
-  while (!t->ready)
-    sched_yield();
-
-  return (struct spa_thread *)t->tid;
-}
-static int _join(void *_data, struct spa_thread *, void **retval) {
-  struct pwasio *pwasio = _data;
-  struct thread *t = &pwasio->thread;
-  if (!t->handle)
-    return -1;
-
-  DWORD result = WaitForSingleObject(t->handle, INFINITE);
-  if (retval)
-    *retval = t->ret;
-
-  CloseHandle(t->handle);
-  return (result == WAIT_OBJECT_0) ? 0 : -1;
-}
-static int _get_rt_range(void *, const struct spa_dict *, int *min, int *max) {
-  *min = THREAD_PRIORITY_NORMAL;
-  *max = THREAD_PRIORITY_TIME_CRITICAL;
-  return 0;
-}
-static int _acquire_rt(void *_data, struct spa_thread *, int priority) {
-  struct pwasio *pwasio = _data;
-  int err = 0;
-  if (pwasio->priority && priority == -1) {
-    WINE_TRACE("setting driver scheduler to SCHED_FIFO with priority %d\n",
-               pwasio->priority);
-    if ((err = pthread_setschedparam(
-             pwasio->thread.tid, SCHED_FIFO,
-             &(struct sched_param){.sched_priority = pwasio->priority})))
-      WINE_ERR("%s\n", strerror(err));
-  }
-  return err;
-}
-static int _drop_rt(void *_data, struct spa_thread *) {
-  struct pwasio *pwasio = _data;
-  if (pwasio->priority) {
-    WINE_TRACE("setting driver scheduler to SCHED_OTHER\n");
-    int err;
-    if ((err =
-             pthread_setschedparam(pwasio->thread.tid, SCHED_OTHER,
-                                   &(struct sched_param){.sched_priority = 0})))
-      WINE_ERR("%s\n", strerror(err));
-  }
-  return 0;
-}
 
 HRESULT WINAPI CreateInstance(LPCLASSFACTORY _data, LPUNKNOWN outer, REFIID,
                               LPVOID *ptr) {
@@ -1052,23 +1063,10 @@ HRESULT WINAPI CreateInstance(LPCLASSFACTORY _data, LPUNKNOWN outer, REFIID,
       .Future = (void *)not_impl,
       .OutputReady = (void *)not_impl,
   };
-  static const struct spa_thread_utils_methods thread_utils_methods = {
-      .create = _create,
-      .join = _join,
-      .get_rt_range = _get_rt_range,
-      .acquire_rt = _acquire_rt,
-      .drop_rt = _drop_rt,
-  };
   *pwasio = (typeof(*pwasio)){
       .vtbl = &vtbl,
       .ref = 1,
       .hinst = ((struct factory *)_data)->hinst,
-
-      .thread_utils = {{
-          SPA_TYPE_INTERFACE_ThreadUtils,
-          SPA_VERSION_THREAD_UTILS,
-          SPA_CALLBACKS_INIT(&thread_utils_methods, pwasio),
-      }},
 
       .fd = -1,
       .buffer = MAP_FAILED,
