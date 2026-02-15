@@ -92,8 +92,10 @@ static DWORD WINAPI _thread_func(LPVOID p) {
   t->ret = t->start(t->arg);
   return 0;
 }
-static struct spa_thread *_create(void *_data, const struct spa_dict *,
-                                  void *(*start)(void *), void *arg) {
+static struct spa_thread *_thread_utils_create(void *_data,
+                                               const struct spa_dict *,
+                                               void *(*start)(void *),
+                                               void *arg) {
   struct thread *t = _data;
 
   t->start = start;
@@ -107,7 +109,7 @@ static struct spa_thread *_create(void *_data, const struct spa_dict *,
 
   return (struct spa_thread *)t->tid;
 }
-static int _join(void *_data, struct spa_thread *, void **retval) {
+static int _thread_utils_join(void *_data, struct spa_thread *, void **retval) {
   struct thread *t = _data;
   if (!t->handle)
     return -1;
@@ -119,12 +121,14 @@ static int _join(void *_data, struct spa_thread *, void **retval) {
   CloseHandle(t->handle);
   return (result == WAIT_OBJECT_0) ? 0 : -1;
 }
-static int _get_rt_range(void *, const struct spa_dict *, int *min, int *max) {
+static int _thread_utils_get_rt_range(void *, const struct spa_dict *, int *min,
+                                      int *max) {
   *min = THREAD_PRIORITY_NORMAL;
   *max = THREAD_PRIORITY_TIME_CRITICAL;
   return 0;
 }
-static int _acquire_rt(void *_data, struct spa_thread *, int priority) {
+static int _thread_utils_acquire_rt(void *_data, struct spa_thread *,
+                                    int priority) {
   struct thread *t = _data;
   int err = 0;
   if (t->priority && priority == -1) {
@@ -137,7 +141,7 @@ static int _acquire_rt(void *_data, struct spa_thread *, int priority) {
   }
   return err;
 }
-static int _drop_rt(void *_data, struct spa_thread *) {
+static int _thread_utils_drop_rt(void *_data, struct spa_thread *) {
   struct thread *t = _data;
   if (t->priority) {
     WINE_TRACE("setting driver scheduler to SCHED_OTHER\n");
@@ -162,8 +166,12 @@ struct pwasio {
   pthread_t host_tid;
   int host_priority;
 
-  struct spa_thread_utils thread_utils;
-  struct thread thread;
+  struct {
+    struct pw_thread_loop *loop;
+    struct pw_context *context;
+    struct spa_thread_utils thread_utils;
+    struct thread thread;
+  } context;
 
   struct pw_data_loop *loop;
 
@@ -222,12 +230,19 @@ STDMETHODIMP_(ULONG32) Release(struct asio *_data) {
 
   if (pwasio->fd >= 0)
     pwasio->vtbl->DisposeBuffers(_data);
+  if (pwasio->context.loop) {
+    pw_loop_invoke(pw_thread_loop_get_loop(pwasio->context.loop), nullptr, 0,
+                   nullptr, 0, false, nullptr);
+    pw_thread_loop_stop(pwasio->context.loop);
+  }
   if (pwasio->output)
     pw_stream_destroy(pwasio->output);
   if (pwasio->input)
     pw_stream_destroy(pwasio->input);
-  if (pwasio->loop)
-    pw_data_loop_destroy(pwasio->loop);
+  if (pwasio->context.context)
+    pw_context_destroy(pwasio->context.context);
+  if (pwasio->context.loop)
+    pw_thread_loop_destroy(pwasio->context.loop);
 
   if (pwasio->host_priority) {
     WINE_TRACE("setting host scheduler to SCHED_OTHER\n");
@@ -350,7 +365,8 @@ STDMETHODIMP_(LONG32) Init(struct asio *_data, void *) {
     pwasio->buffer_size = get_dword(config, KEY_BUFSIZE, DEFAULT_BUFSIZE);
     pwasio->sample_rate = get_dword(config, KEY_SMPRATE, DEFAULT_SMPRATE);
     pwasio->autoconnect = get_dword(config, KEY_AUTOCON, DEFAULT_AUTOCON);
-    pwasio->thread.priority = get_dword(config, KEY_PRIORITY, DEFAULT_PRIORITY);
+    pwasio->context.thread.priority =
+        get_dword(config, KEY_PRIORITY, DEFAULT_PRIORITY);
     pwasio->host_priority =
         get_dword(config, KEY_HOST_PRIORITY, DEFAULT_PRIORITY);
 #undef get_dword
@@ -362,17 +378,17 @@ STDMETHODIMP_(LONG32) Init(struct asio *_data, void *) {
     pwasio->buffer_size = DEFAULT_BUFSIZE;
     pwasio->sample_rate = DEFAULT_SMPRATE;
     pwasio->autoconnect = DEFAULT_AUTOCON;
-    pwasio->thread.priority = DEFAULT_PRIORITY;
+    pwasio->context.thread.priority = DEFAULT_PRIORITY;
     pwasio->host_priority = DEFAULT_PRIORITY;
   }
 
   WINE_TRACE("starting pwasio\n");
   pwasio->host_tid = pthread_self();
-  if (pwasio->thread.priority || pwasio->host_priority) {
+  if (pwasio->context.thread.priority || pwasio->host_priority) {
     struct rlimit rl;
     if (getrlimit(RLIMIT_RTPRIO, &rl) || rl.rlim_max < 1 ||
-        !(rl.rlim_cur =
-              SPA_MAX(pwasio->thread.priority, pwasio->host_priority)) ||
+        !(rl.rlim_cur = SPA_MAX(pwasio->context.thread.priority,
+                                pwasio->host_priority)) ||
         setrlimit(RLIMIT_RTPRIO, &rl))
       pwasio_err(ASIO_ERROR_INVALID_MODE,
                  "unable to get realtime privileges: %s\n", strerror(errno));
@@ -386,25 +402,46 @@ STDMETHODIMP_(LONG32) Init(struct asio *_data, void *) {
     }
   }
 
-  if (!(pwasio->loop = pw_data_loop_new(nullptr)))
-    pwasio_err(ASIO_ERROR_NO_MEMORY, "failed to create PipeWire loop\n");
-
-  static const struct spa_thread_utils_methods thread_utils_methods = {
-      .create = _create,
-      .join = _join,
-      .get_rt_range = _get_rt_range,
-      .acquire_rt = _acquire_rt,
-      .drop_rt = _drop_rt,
-  };
-  pwasio->thread_utils.iface = SPA_INTERFACE_INIT(
-      SPA_TYPE_INTERFACE_ThreadUtils, SPA_VERSION_THREAD_UTILS,
-      &thread_utils_methods, &pwasio->thread);
-  pw_data_loop_set_thread_utils(pwasio->loop, &pwasio->thread_utils);
-
   WCHAR path[MAX_PATH];
   GetModuleFileNameW(0, path, MAX_PATH);
   WideCharToMultiByte(CP_ACP, WC_SEPCHARS, StrRChrW(path, nullptr, '\\') + 1,
                       -1, pwasio->name, sizeof pwasio->name, nullptr, nullptr);
+
+  int err;
+  if (!(pwasio->context.loop = pw_thread_loop_new(pwasio->name, nullptr))) {
+    err = ASIO_ERROR_NO_MEMORY;
+    sprintf(pwasio->err_msg, "failed to create PipeWire loop\n");
+    goto err_loop;
+  }
+  if (!(pwasio->context.context = pw_context_new(
+            pw_thread_loop_get_loop(pwasio->context.loop),
+            pw_properties_new(PW_KEY_CLIENT_NAME, pwasio->name,
+                              PW_KEY_CLIENT_API, "ASIO", nullptr),
+            0))) {
+    err = ASIO_ERROR_NO_MEMORY;
+    sprintf(pwasio->err_msg, "failed to create PipeWire context\n");
+    goto err_ctx;
+  }
+
+  static const struct spa_thread_utils_methods thread_utils_methods = {
+      .create = _thread_utils_create,
+      .join = _thread_utils_join,
+      .get_rt_range = _thread_utils_get_rt_range,
+      .acquire_rt = _thread_utils_acquire_rt,
+      .drop_rt = _thread_utils_drop_rt,
+  };
+  pwasio->context.thread_utils.iface = SPA_INTERFACE_INIT(
+      SPA_TYPE_INTERFACE_ThreadUtils, SPA_VERSION_THREAD_UTILS,
+      &thread_utils_methods, &pwasio->context.thread);
+
+  pwasio->loop = pw_context_get_data_loop(pwasio->context.context);
+  pw_data_loop_stop(pwasio->loop);
+
+  pw_context_set_object(pwasio->context.context, SPA_TYPE_INTERFACE_ThreadUtils,
+                        &pwasio->context.thread_utils);
+
+  pw_thread_loop_start(pwasio->context.loop);
+  pw_thread_loop_lock(pwasio->context.loop);
 
   char rate_str[8], bufsize_str[8];
   sprintf(rate_str, "%lu", pwasio->sample_rate);
@@ -422,8 +459,11 @@ STDMETHODIMP_(LONG32) Init(struct asio *_data, void *) {
                 PW_KEY_MEDIA_ROLE, "Music", PW_KEY_NODE_NAME, "pwasio input",
                 PW_KEY_NODE_ALWAYS_PROCESS, "true", PW_KEY_NODE_FORCE_RATE,
                 rate_str, PW_KEY_NODE_FORCE_QUANTUM, bufsize_str, nullptr),
-            &input_events, pwasio)))
-    pwasio_err(ASIO_ERROR_NO_MEMORY, "failed to create input stream");
+            &input_events, pwasio))) {
+    err = ASIO_ERROR_NO_MEMORY;
+    sprintf(pwasio->err_msg, "failed to create input stream\n");
+    goto err_input;
+  }
 
   static const struct pw_stream_events output_events = {
       PW_VERSION_STREAM_EVENTS,
@@ -439,12 +479,27 @@ STDMETHODIMP_(LONG32) Init(struct asio *_data, void *) {
                 PW_KEY_NODE_ALWAYS_PROCESS, "true", PW_KEY_NODE_FORCE_RATE,
                 rate_str, PW_KEY_NODE_FORCE_QUANTUM, bufsize_str, nullptr),
             &output_events, pwasio))) {
-    pw_stream_destroy(pwasio->input);
-    pwasio->input = nullptr;
-    pwasio_err(ASIO_ERROR_NO_MEMORY, "failed to create output stream");
+    err = ASIO_ERROR_NO_MEMORY;
+    sprintf(pwasio->err_msg, "failed to create input stream\n");
+    goto err_output;
   }
 
+  pw_thread_loop_unlock(pwasio->context.loop);
+
   return 1;
+
+err_output:
+  pw_stream_destroy(pwasio->input);
+  pwasio->input = nullptr;
+err_input:
+  pw_context_destroy(pwasio->context.context);
+  pwasio->context.context = nullptr;
+err_ctx:
+  pw_thread_loop_destroy(pwasio->context.loop);
+  pwasio->context.loop = nullptr;
+err_loop:
+  WINE_TRACE("%s", pwasio->err_msg);
+  return err;
 }
 
 STDMETHODIMP_(VOID) GetDriverName(struct asio *, PSTR name) {
@@ -475,8 +530,10 @@ STDMETHODIMP_(LONG32) Start(struct asio *_data) {
   if (!pwasio->input || !pwasio->output)
     pwasio_err(ASIO_ERROR_NOT_PRESENT, "no IO");
 
+  pw_thread_loop_lock(pwasio->context.loop);
   if (pw_data_loop_start(pwasio->loop) < 0)
     pwasio_err(ASIO_ERROR_HW_MALFUNCTION, "failed to start PipeWire data loop");
+  pw_thread_loop_unlock(pwasio->context.loop);
 
   pwasio->running = true;
   return ASIO_ERROR_OK;
@@ -489,10 +546,15 @@ STDMETHODIMP_(LONG32) Stop(struct asio *_data) {
   if (!pwasio->input || !pwasio->output)
     pwasio_err(ASIO_ERROR_NOT_PRESENT, "no IO");
 
+  WINE_TRACE("locking loop\n");
+  pw_thread_loop_lock(pwasio->context.loop);
   if (pwasio->running) {
     pwasio->running = false;
+    WINE_TRACE("stopping loop\n");
     pw_data_loop_stop(pwasio->loop);
   }
+  WINE_TRACE("unlocking loop\n");
+  pw_thread_loop_unlock(pwasio->context.loop);
 
   return ASIO_ERROR_OK;
 }
@@ -739,6 +801,7 @@ CreateBuffers(struct asio *_data, struct asio_buffer_info *channels,
       info->buf[b] = pwasio->buffer + p->offset[b];
   }
 
+  pw_thread_loop_lock(pwasio->context.loop);
   enum pw_stream_flags flags = PW_STREAM_FLAG_ALLOC_BUFFERS;
   if (pwasio->autoconnect)
     flags |= PW_STREAM_FLAG_AUTOCONNECT;
@@ -764,6 +827,7 @@ CreateBuffers(struct asio *_data, struct asio_buffer_info *channels,
                           params, SPA_N_ELEMENTS(params)) < 0) {
       sprintf(msg, "Failed to connect input stream\n");
       res = ASIO_ERROR_NO_MEMORY;
+      pw_thread_loop_unlock(pwasio->context.loop);
       goto cleanup;
     }
   }
@@ -788,9 +852,11 @@ CreateBuffers(struct asio *_data, struct asio_buffer_info *channels,
                           params, SPA_N_ELEMENTS(params)) < 0) {
       sprintf(msg, "Failed to connect output stream\n");
       res = ASIO_ERROR_NO_MEMORY;
+      pw_thread_loop_unlock(pwasio->context.loop);
       goto cleanup;
     }
   }
+  pw_thread_loop_unlock(pwasio->context.loop);
 
   return ASIO_ERROR_OK;
 cleanup:
@@ -827,12 +893,14 @@ STDMETHODIMP_(LONG32) DisposeBuffers(struct asio *_data) {
   if (pwasio->fd < 0)
     pwasio_err(ASIO_ERROR_INVALID_MODE, "no buffers");
 
+  pw_thread_loop_lock(pwasio->context.loop);
   if (pw_stream_get_state(pwasio->output, nullptr) !=
       PW_STREAM_STATE_UNCONNECTED)
     pw_stream_disconnect(pwasio->output);
   if (pw_stream_get_state(pwasio->input, nullptr) !=
       PW_STREAM_STATE_UNCONNECTED)
     pw_stream_disconnect(pwasio->input);
+  pw_thread_loop_unlock(pwasio->context.loop);
 
   for (size_t i = 0; i < MAX_PORTS; i++)
     pwasio->inputs[i].active = pwasio->outputs[i].active = false;
@@ -938,7 +1006,7 @@ static DWORD WINAPI _panel_thread(LPVOID p) {
       .buffer_size = pwasio->buffer_size,
       .sample_rate = pwasio->sample_rate,
       .autoconnect = pwasio->autoconnect,
-      .priority = pwasio->thread.priority,
+      .priority = pwasio->context.thread.priority,
       .host_priority = pwasio->host_priority,
   };
   if (!(pwasio->dialog = CreateDialogParamA(
@@ -982,7 +1050,7 @@ static DWORD WINAPI _panel_thread(LPVOID p) {
     if (cfg.autoconnect != pwasio->autoconnect)
       CHK(RegSetValueExA(config, KEY_AUTOCON, 0, REG_DWORD,
                          (BYTE *)&(DWORD){cfg.autoconnect}, sizeof(DWORD)));
-    if (cfg.priority != pwasio->thread.priority)
+    if (cfg.priority != pwasio->context.thread.priority)
       CHK(RegSetValueExA(config, KEY_PRIORITY, 0, REG_DWORD,
                          (BYTE *)&(DWORD){cfg.priority}, sizeof(DWORD)));
     if (cfg.host_priority != pwasio->host_priority)
