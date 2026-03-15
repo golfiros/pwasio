@@ -2,8 +2,8 @@ LIB_NAME := pwasio.dll
 DRIVER_REG := Software\\ASIO\\pwasio
 
 VERSION_MAJOR := 0
-VERSION_MINOR := 0
-VERSION_PATCH := 2
+VERSION_MINOR := 1
+VERSION_PATCH := 0
 
 DIR_LIB := lib
 DIR_BLD := .build

@@ -93,7 +93,7 @@ struct asio_callbacks {
 
 struct asio_buffer_info {
   const LONG32 input;
-  const LONG32 channel;
+  const LONG32 index;
   PVOID buf[2];
 };
 

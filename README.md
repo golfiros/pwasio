@@ -1,21 +1,17 @@
 # pwasio
 
 pwasio is an ASIO driver for Wine with a PipeWire backend. ASIO is commonly used
-in Windows audio workstation programs. Works in current Steam Runtime (sniper).
-Does not work in the latest release version of PipeWire (1.4.9) due to changes
-in audio buffer negotiation logic since version 0.3.65 included in the Steam
-Runtime. Patches introduced in PipeWire 1.6 should fix it.
+in Windows audio workstation programs. Requires at least PipeWire 1.6 for proper
+buffer negotiation.
 
 ### Building
 
 Do the following to build for 64-bit Wine.
-
 ```sh
 make
 ```
 
 Logging is enabled in debug builds, using
-
 ```sh
 DEBUG=true make
 ```
@@ -88,6 +84,8 @@ instability, so increase it accordingly if necessary.
 
 ### Change Log
 
+#### 0.1.0
+* 15/03/2026: Switch back to `pw_filter` (GG)
 #### 0.0.2
 * 24/12/2025: Separate driver and host realtime priorities (GG)
 #### 0.0.1
@@ -112,6 +110,6 @@ Portions copyright (C) 2010 Nedko Arnaudov
 Portions copyright (C) 2011 Christian Schoenebeck  
 Portions copyright (C) 2013 Joakim Hernberg  
 Portions copyright (C) 2020-2023 Filipe Coelho  
-Portions copyright (C) 2025 Gabriel Golfetti  
+Portions copyright (C) 2025-2026 Gabriel Golfetti  
 
 pwasio is licensed under GPL v3+, see LICENSE for more details.  
