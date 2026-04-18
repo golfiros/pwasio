@@ -561,9 +561,39 @@ static void _global(void *_data, uint32_t id, uint32_t, const char *type,
     *p = port;
   }
 }
+void _global_remove(void *_data, uint32_t id) {
+  struct context *context = _data;
+  for (struct node *node = context->nodes, *prev = nullptr; node;
+       prev = node, node = node->next)
+    if (node->id == id) {
+      for (size_t i = 0; i < 2; i++)
+        for (struct port *port = node->ports[i], *p = nullptr; port; port = p) {
+          p = port->next;
+          free(port);
+        }
+      if (prev)
+        prev->next = node->next;
+      else
+        context->nodes = node->next;
+      free(node);
+      return;
+    } else
+      for (size_t i = 0; i < 2; i++)
+        for (struct port *port = node->ports[i], *prev = nullptr; port;
+             prev = port, port = port->next)
+          if (port->id == id) {
+            if (prev)
+              prev->next = port->next;
+            else
+              node->ports[i] = port->next;
+            free(port);
+            return;
+          }
+}
 static const struct pw_registry_events registry_events = {
     PW_VERSION_REGISTRY_EVENTS,
     .global = _global,
+    .global_remove = _global_remove,
 };
 
 STDMETHODIMP QueryInterface(struct asio *_data, REFIID riid, PVOID *out) {
@@ -594,10 +624,9 @@ STDMETHODIMP_(ULONG32) Release(struct asio *_data) {
     return ref;
 
   if (pwasio->panel) {
-    // TODO: tell the panel to close
     if (pwasio->dialog)
       PostMessage(pwasio->dialog, WM_COMMAND, IDCANCEL, 0);
-    WaitForSingleObject(pwasio->panel, 3000);
+    WaitForSingleObject(pwasio->panel, INFINITY);
     CloseHandle(pwasio->panel);
   }
 
@@ -796,16 +825,15 @@ STDMETHODIMP_(LONG32) Init(struct asio *_data, void *) {
                       (BYTE *)pwasio->ports[PW_DIRECTION_OUTPUT], &out);
   }
 
-  for (size_t i = 0; i < 2; i++) {
+  for (size_t i = 0; i < 2; i++)
     if (!pwasio->ports[i]) {
-      size_t len;
       if (context->defaults) {
         struct metadata *defaults =
             pw_proxy_get_user_data((struct pw_proxy *)context->defaults);
         for (const struct node *node = context->nodes;
              node && !pwasio->ports[i]; node = node->next)
           if (spa_streq(node->name, defaults->defaults[i])) {
-            len = 1;
+            size_t len = 1;
             for (const struct port *port = node->ports[!i]; port;
                  port = port->next)
               len += snprintf(nullptr, 0, "%s:%s", node->name, port->name) + 1;
@@ -820,12 +848,9 @@ STDMETHODIMP_(LONG32) Init(struct asio *_data, void *) {
                  port = port->next)
               p += sprintf(p, "%s:%s", node->name, port->name) + 1;
           }
-      } else {
+      } else
         pwasio->ports[i] = (char *)dummy_port;
-        len = sizeof dummy_port;
-      }
     }
-  }
 
   if (context->defaults) {
     struct metadata *defaults =
