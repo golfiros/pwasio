@@ -67,10 +67,12 @@ Keys are:
   - `priority` DWORD -- realtime priority for the ASIO driver
   - `host_priority` DWORD -- realtime priority for the ASIO host
   - `inputs`,`outputs` Multi-String -- respective list of ports to be used by
-  the driver in the format `<node.name>:<port.name>`.
+  the driver in the format `<node.name>:<port.name>` as reported by `pw-dump`.
 
 It can also be done through the ASIO control panel while the driver is loaded.
 Configuration is only saved by the driver if manually overriden in the panel.
+Node names shown here are aliases and are not suitable for manual registry
+edits.
 
 ![Screenshot](screenshot.jpg)
 
