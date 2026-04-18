@@ -205,23 +205,23 @@ static void _remove_buffer(void *_data, void *_port, struct pw_buffer *buf) {
     channel->buffer[1] = nullptr;
 }
 static void _process(void *_data, struct spa_io_position *pos) {
-  struct engine *pwasio = _data;
+  struct engine *engine = _data;
 
-  pwasio->pos = pos->clock.position;
-  pwasio->nsec = pos->clock.nsec;
+  engine->pos = pos->clock.position;
+  engine->nsec = pos->clock.nsec;
 
-  for (size_t i = 0; i < pwasio->n_channels; i++) {
-    struct channel channel = pwasio->channels[i];
+  for (size_t i = 0; i < engine->n_channels; i++) {
+    struct channel channel = engine->channels[i];
     if (SPA_LIKELY(channel.port))
       pw_filter_dequeue_buffer(channel.port);
   }
 
-  pwasio->callbacks->swap_buffers(pwasio->idx, false);
+  engine->callbacks->swap_buffers(engine->idx, false);
 
   struct pw_buffer *buf;
-  for (size_t i = 0; i < pwasio->n_channels; i++) {
-    struct channel channel = pwasio->channels[i];
-    if (SPA_LIKELY(buf = channel.buffer[pwasio->idx])) {
+  for (size_t i = 0; i < engine->n_channels; i++) {
+    struct channel channel = engine->channels[i];
+    if (SPA_LIKELY(buf = channel.buffer[engine->idx])) {
       if (channel.dir != PW_DIRECTION_INPUT) {
         struct spa_data *d = &buf->buffer->datas[0];
         d->chunk->offset = 0;
@@ -233,7 +233,7 @@ static void _process(void *_data, struct spa_io_position *pos) {
     }
   }
 
-  pwasio->idx = !pwasio->idx;
+  engine->idx = !engine->idx;
 }
 static const struct pw_filter_events filter_events = {
     PW_VERSION_FILTER_EVENTS,
@@ -485,14 +485,14 @@ static void _global(void *_data, uint32_t id, uint32_t, const char *type,
       return;
 
     enum pw_direction dir;
-    if ((val = spa_dict_lookup(props, PW_KEY_PORT_DIRECTION))) {
-      if (spa_streq(val, "in")) {
-        dir = PW_DIRECTION_INPUT;
-      } else if (spa_streq(val, "out")) {
-        dir = PW_DIRECTION_OUTPUT;
-      } else
-        return;
-    }
+    if (!(val = spa_dict_lookup(props, PW_KEY_PORT_DIRECTION)))
+      return;
+    if (spa_streq(val, "in")) {
+      dir = PW_DIRECTION_INPUT;
+    } else if (spa_streq(val, "out")) {
+      dir = PW_DIRECTION_OUTPUT;
+    } else
+      return;
 
     if (!(val = spa_dict_lookup(props, PW_KEY_PORT_ID)))
       return;
@@ -831,7 +831,7 @@ STDMETHODIMP_(LONG32) Init(struct asio *_data, void *) {
     struct metadata *defaults =
         pw_proxy_get_user_data((struct pw_proxy *)context->defaults);
     spa_hook_remove(&defaults->listener);
-    pw_proxy_destroy((struct pw_proxy *)defaults);
+    pw_proxy_destroy((struct pw_proxy *)context->defaults);
   }
 
   if (key)
@@ -988,13 +988,13 @@ GetChannels(struct asio *_data, LONG *n_inputs, LONG *n_outputs) {
     pwasio_err(ASIO_ERROR_NOT_PRESENT, "no IO configured");
 
   *n_inputs = 0;
-  for (const char *(p) = (pwasio->ports[SPA_DIRECTION_INPUT]); *(p);
-       (p) += strlen(p) + 1)
+  for (const char *p = (pwasio->ports[SPA_DIRECTION_INPUT]); *p;
+       p += strlen(p) + 1)
     (*n_inputs)++;
 
   *n_outputs = 0;
-  for (const char *(p) = (pwasio->ports[SPA_DIRECTION_OUTPUT]); *(p);
-       (p) += strlen(p) + 1)
+  for (const char *p = (pwasio->ports[SPA_DIRECTION_OUTPUT]); *p;
+       p += strlen(p) + 1)
     (*n_outputs)++;
 
   return ASIO_ERROR_OK;
@@ -1220,7 +1220,6 @@ CreateBuffers(struct asio *_data, struct asio_buffer_info *channels,
     goto cleanup;
   }
 
-  pw_thread_loop_lock(context->th_loop);
   struct pw_properties *props;
   if (!(props = pw_properties_copy(pw_core_get_properties(context->core)))) {
     res = ASIO_ERROR_NO_MEMORY;
@@ -1238,12 +1237,14 @@ CreateBuffers(struct asio *_data, struct asio_buffer_info *channels,
   pw_properties_setf(props, PW_KEY_NODE_FORCE_RATE, "%lu", pwasio->sample_rate);
   pw_properties_setf(props, PW_KEY_NODE_FORCE_QUANTUM, "%d", buffer_size);
 
+  pw_thread_loop_lock(context->th_loop);
   if (!(context->filter = pw_filter_new_simple(
             pw_data_loop_get_loop(context->loop), pwasio->name, props,
             &filter_events, engine))) {
     res = ASIO_ERROR_NO_MEMORY;
     snprintf(msg, sizeof msg, "failed to create PipeWire filter\n");
     pw_properties_free(props);
+    pw_thread_loop_unlock(context->th_loop);
     goto cleanup;
   }
   size_t offset = 0;
@@ -1377,7 +1378,7 @@ STDMETHODIMP_(LONG32) DisposeBuffers(struct asio *_data) {
   munmap(engine->buffer, fsize);
   close(engine->fd);
 
-  return 0;
+  return ASIO_ERROR_OK;
 }
 
 struct panel {
@@ -1505,6 +1506,7 @@ static LRESULT CALLBACK _checkbox_func(HWND tree, UINT uMsg, WPARAM wParam,
           free((char *)port.lParam);
       }
     }
+    break;
   case TVM_MOVEUP:
   case TVM_MOVEDOWN: {
     LVITEM src = {
@@ -1816,7 +1818,7 @@ static DWORD WINAPI _panel_thread(LPVOID p) {
       for (const char *p = panel.ports[i], *q = pwasio->ports[i];
            !reset && (*p || *q); p += strlen(p) + 1, q += strlen(q) + 1)
         if (key && !spa_streq(p, q)) {
-          if (!RegSetValueEx(
+          if (RegSetValueEx(
                   key, i == PW_DIRECTION_INPUT ? KEY_INPUTS : KEY_OUTPUTS, 0,
                   REG_MULTI_SZ, (BYTE *)panel.ports[i], panel.len[i]))
             WINE_WARN("unable to write io configuration\n");
