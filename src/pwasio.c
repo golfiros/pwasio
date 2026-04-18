@@ -756,12 +756,13 @@ STDMETHODIMP_(LONG32) Init(struct asio *_data, void *) {
 
   HKEY key = nullptr;
   if (RegCreateKeyEx(HKEY_CURRENT_USER, DRIVER_REG, 0, nullptr, 0,
-                     KEY_WRITE | KEY_READ, nullptr, &key, nullptr))
+                     KEY_WRITE | KEY_READ, nullptr, &key,
+                     nullptr) != ERROR_SUCCESS)
     key = nullptr;
 
   DWORD out;
-  if (key && !RegQueryValueEx(key, KEY_BUFSIZE, 0, nullptr, (BYTE *)&out,
-                              &(DWORD){sizeof out}))
+  if (key && RegQueryValueEx(key, KEY_BUFSIZE, 0, nullptr, (BYTE *)&out,
+                             &(DWORD){sizeof out}) == ERROR_SUCCESS)
     pwasio->buffer_size = out;
   else if (context->settings) {
     struct metadata *settings =
@@ -769,8 +770,8 @@ STDMETHODIMP_(LONG32) Init(struct asio *_data, void *) {
     pwasio->buffer_size = settings->buffer_size;
   } else
     pwasio->buffer_size = DEFAULT_BUFSIZE;
-  if (key && !RegQueryValueEx(key, KEY_SMPRATE, 0, nullptr, (BYTE *)&out,
-                              &(DWORD){sizeof out}))
+  if (key && RegQueryValueEx(key, KEY_SMPRATE, 0, nullptr, (BYTE *)&out,
+                             &(DWORD){sizeof out}) == ERROR_SUCCESS)
     pwasio->sample_rate = out;
   else if (context->settings) {
     struct metadata *settings =
@@ -785,8 +786,8 @@ STDMETHODIMP_(LONG32) Init(struct asio *_data, void *) {
     pw_proxy_destroy((struct pw_proxy *)context->settings);
   }
 
-  if (key && !RegQueryValueEx(key, KEY_PRIORITY, 0, nullptr, (BYTE *)&out,
-                              &(DWORD){sizeof out})) {
+  if (key && RegQueryValueEx(key, KEY_PRIORITY, 0, nullptr, (BYTE *)&out,
+                             &(DWORD){sizeof out}) == ERROR_SUCCESS) {
     pwasio->thread.priority = out;
   } else if (context->realtime) {
     struct module *module =
@@ -801,20 +802,20 @@ STDMETHODIMP_(LONG32) Init(struct asio *_data, void *) {
     pw_proxy_destroy((struct pw_proxy *)context->realtime);
   }
 
-  if (key && !RegQueryValueEx(key, KEY_HOST_PRIORITY, 0, nullptr, (BYTE *)&out,
-                              &(DWORD){sizeof out}))
+  if (key && RegQueryValueEx(key, KEY_HOST_PRIORITY, 0, nullptr, (BYTE *)&out,
+                             &(DWORD){sizeof out}) == ERROR_SUCCESS)
     pwasio->host_priority = SPA_MIN((int)out, pwasio->thread.priority);
   else
     pwasio->host_priority = pwasio->thread.priority / 2;
 
-  if (key &&
-      !RegQueryValueEx(key, KEY_INPUTS, nullptr, nullptr, nullptr, &out)) {
+  if (key && RegQueryValueEx(key, KEY_INPUTS, nullptr, nullptr, nullptr,
+                             &out) == ERROR_SUCCESS) {
     if ((pwasio->ports[PW_DIRECTION_INPUT] = malloc(out)))
       RegQueryValueEx(key, KEY_INPUTS, nullptr, nullptr,
                       (BYTE *)pwasio->ports[PW_DIRECTION_INPUT], &out);
   }
-  if (key &&
-      !RegQueryValueEx(key, KEY_OUTPUTS, nullptr, nullptr, nullptr, &out)) {
+  if (key && RegQueryValueEx(key, KEY_OUTPUTS, nullptr, nullptr, nullptr,
+                             &out) == ERROR_SUCCESS) {
     if ((pwasio->ports[PW_DIRECTION_OUTPUT] = malloc(out)))
       RegQueryValueEx(key, KEY_OUTPUTS, nullptr, nullptr,
                       (BYTE *)pwasio->ports[PW_DIRECTION_OUTPUT], &out);
@@ -1798,31 +1799,36 @@ static DWORD WINAPI _panel_thread(LPVOID p) {
 
   HKEY key = nullptr;
   if (RegCreateKeyEx(HKEY_CURRENT_USER, DRIVER_REG, 0, nullptr, 0,
-                     KEY_WRITE | KEY_READ, nullptr, &key, nullptr))
+                     KEY_WRITE | KEY_READ, nullptr, &key,
+                     nullptr) != ERROR_SUCCESS)
     key = nullptr;
 
   bool reset = false;
   if (key && panel.buffer_size != pwasio->buffer_size) {
     if (RegSetValueEx(key, KEY_BUFSIZE, 0, REG_DWORD,
-                      (BYTE *)&(DWORD){panel.buffer_size}, sizeof(DWORD)))
+                      (BYTE *)&(DWORD){panel.buffer_size},
+                      sizeof(DWORD)) != ERROR_SUCCESS)
       WINE_WARN("failed to write buffer size configuration\n");
     reset = true;
   }
   if (key && panel.sample_rate != pwasio->sample_rate) {
     if (RegSetValueEx(key, KEY_SMPRATE, 0, REG_DWORD,
-                      (BYTE *)&(DWORD){panel.sample_rate}, sizeof(DWORD)))
+                      (BYTE *)&(DWORD){panel.sample_rate},
+                      sizeof(DWORD)) != ERROR_SUCCESS)
       WINE_WARN("failed to write sample rate configuration\n");
     reset = true;
   }
   if (key && panel.priority != pwasio->thread.priority) {
     if (RegSetValueEx(key, KEY_PRIORITY, 0, REG_DWORD,
-                      (BYTE *)&(DWORD){panel.priority}, sizeof(DWORD)))
+                      (BYTE *)&(DWORD){panel.priority},
+                      sizeof(DWORD)) != ERROR_SUCCESS)
       WINE_WARN("failed to write driver priority configuration\n");
     reset = true;
   }
   if (key && panel.host_priority != pwasio->host_priority) {
     if (RegSetValueEx(key, KEY_HOST_PRIORITY, 0, REG_DWORD,
-                      (BYTE *)&(DWORD){panel.host_priority}, sizeof(DWORD)))
+                      (BYTE *)&(DWORD){panel.host_priority},
+                      sizeof(DWORD)) != ERROR_SUCCESS)
       WINE_WARN("failed to write host priority configuration\n");
     reset = true;
   }
@@ -1831,9 +1837,10 @@ static DWORD WINAPI _panel_thread(LPVOID p) {
       for (const char *p = panel.ports[i], *q = pwasio->ports[i];
            !reset && (*p || *q); p += strlen(p) + 1, q += strlen(q) + 1)
         if (key && !spa_streq(p, q)) {
-          if (RegSetValueEx(
-                  key, i == PW_DIRECTION_INPUT ? KEY_INPUTS : KEY_OUTPUTS, 0,
-                  REG_MULTI_SZ, (BYTE *)panel.ports[i], panel.len[i]))
+          if (RegSetValueEx(key,
+                            i == PW_DIRECTION_INPUT ? KEY_INPUTS : KEY_OUTPUTS,
+                            0, REG_MULTI_SZ, (BYTE *)panel.ports[i],
+                            panel.len[i]) != ERROR_SUCCESS)
             WINE_WARN("unable to write io configuration\n");
           reset = true;
         }
