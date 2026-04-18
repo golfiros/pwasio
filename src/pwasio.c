@@ -321,20 +321,6 @@ static const struct pw_core_events core_events = {
     .done = _done,
     .error = _error,
 };
-static inline int core_sync(struct context *context) {
-  return context->pending =
-             pw_proxy_sync((struct pw_proxy *)context->core, context->pending);
-}
-static inline int core_wait(const struct context *context) {
-  while (true) {
-    pw_thread_loop_wait(context->th_loop);
-    if (context->res < 0)
-      return context->res;
-    if (context->last == context->pending)
-      break;
-  }
-  return 0;
-}
 
 struct module {
   struct spa_hook listener;
@@ -407,7 +393,8 @@ static void _global(void *_data, uint32_t id, uint32_t, const char *type,
     *priority = (typeof(*priority)){.priority = DEFAULT_PRIORITY};
     pw_module_add_listener(context->realtime, &priority->listener,
                            &module_events, priority);
-    core_sync(context);
+    context->pending =
+        pw_proxy_sync((struct pw_proxy *)context->core, context->pending);
   } else if (spa_streq(type, PW_TYPE_INTERFACE_Metadata)) {
     if (!(val = spa_dict_lookup(props, PW_KEY_METADATA_NAME)))
       return;
@@ -424,7 +411,8 @@ static void _global(void *_data, uint32_t id, uint32_t, const char *type,
       };
       pw_metadata_add_listener(context->settings, &settings->listener,
                                &metadata_events, settings);
-      core_sync(context);
+      context->pending =
+          pw_proxy_sync((struct pw_proxy *)context->core, context->pending);
     } else if (spa_streq(val, "default")) {
       struct metadata *defaults;
       if (!(context->defaults = pw_registry_bind(context->registry, id, type,
@@ -436,7 +424,8 @@ static void _global(void *_data, uint32_t id, uint32_t, const char *type,
       };
       pw_metadata_add_listener(context->defaults, &defaults->listener,
                                &metadata_events, defaults);
-      core_sync(context);
+      context->pending =
+          pw_proxy_sync((struct pw_proxy *)context->core, context->pending);
     }
   } else if (spa_streq(type, PW_TYPE_INTERFACE_Node)) {
     if (context->filter && id == pw_filter_get_node_id(context->filter))
@@ -752,12 +741,18 @@ STDMETHODIMP_(LONG32) Init(struct asio *_data, void *) {
   }
   pw_registry_add_listener(context->registry, &context->registry_listener,
                            &registry_events, context);
-  core_sync(context);
-  if (core_wait(context) < 0) {
-    res = ASIO_ERROR_HW_MALFUNCTION;
-    snprintf(msg, sizeof msg, "PipeWire core error");
-    goto cleanup;
-  };
+  context->pending =
+      pw_proxy_sync((struct pw_proxy *)context->core, context->pending);
+  while (true) {
+    pw_thread_loop_wait(context->th_loop);
+    if (context->res < 0) {
+      res = ASIO_ERROR_HW_MALFUNCTION;
+      snprintf(msg, sizeof msg, "PipeWire core error");
+      goto cleanup;
+    }
+    if (context->last == context->pending)
+      break;
+  }
 
   HKEY key = nullptr;
   if (RegCreateKeyEx(HKEY_CURRENT_USER, DRIVER_REG, 0, nullptr, 0,
@@ -1347,13 +1342,6 @@ CreateBuffers(struct asio *_data, struct asio_buffer_info *channels,
     snprintf(msg, sizeof msg, "Failed to connect filter");
     res = ASIO_ERROR_NO_MEMORY;
     pw_thread_loop_unlock(context->th_loop);
-    goto cleanup;
-  }
-  core_sync(context);
-  if (core_wait(context) < 0) {
-    snprintf(msg, sizeof msg, "PipeWire core error");
-    pw_thread_loop_unlock(context->th_loop);
-    res = ASIO_ERROR_HW_MALFUNCTION;
     goto cleanup;
   }
   pw_thread_loop_unlock(context->th_loop);
