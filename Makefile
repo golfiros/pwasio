@@ -12,7 +12,7 @@ DIR_SRC := src
 DIR_GUARD = mkdir -p $(@D)
 
 CC := clang
-LIBS := -lodbc32 -lole32 -luuid -lwinmm -lshlwapi -lgdi32
+LIBS := -lodbc32 -lole32 -luuid -lwinmm -lshlwapi -lgdi32 -lcomctl32
 PKG_CONFIG := libpipewire-0.3
 CFLAGS := -fPIC -Wextra -Wall -Wno-missing-field-initializers -std=gnu23
 DEFNS := -D_REENTRANT -D_GNU_SOURCE -DLIB_NAME='"$(LIB_NAME)"' -DDRIVER_REG='"$(DRIVER_REG)"'

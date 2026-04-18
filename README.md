@@ -61,30 +61,35 @@ users may try out both and figure out what suits them better.
 
 Configuration lives in the registry at `HKEY_CURRENT_USER\Software\ASIO\pwasio`
 and can be done through the ASIO control panel while the driver is loaded.
+Configuration is only saved by the driver if manually overriden in the panel.
 
 ![Screenshot](screenshot.jpg)
 
-Most options are self explanatory. However,
+#### Patchbay (left-hand side)
+Lists available source and sink nodes with available ports. Checkmarks add and
+remove ports, side buttons reorder and remove them. Defaults to PipeWire default
+source and sink whenever it can be parsed.
 
 #### Buffer size and sample rate
 These options operate through the PipeWire `PW_KEY_NODE_FORCE_QUANTUM` and
 `PW_KEY_NODE_FORCE_RATE` options, which force the PipeWire graph to run under
 the specific configuration. Setting these to values not supported by your
-hardware might incur overhead.
+hardware might incur overhead. Defaults to whatever it can parse from
+PipeWire settings.
 
 #### RT priority
-Defaults both to zero which gives default thread scheduling. Setting the
+Defaults to whatever can be parsed from PipeWire's realtime module. Setting the
 respective fields to > 0 will give the driver and host realtime scheduling,
 which may be necessary to achieve lower latencies. The user must have realtime
-privileges. We use `SCHED_FIFO` scheduling with the given priority. For
-reference, the default PipeWire "realtime process" configuration at the time of
-writing would be equivalent to using a value of 88 in the "driver" RT priority.
-It has been found that a small nonzero value for host priority can induce
-instability, so increase it accordingly if necessary.
+privileges. We use `SCHED_FIFO` scheduling with the given priority. Host
+priority defaults to half of driver priority.
 
 ### Change Log
 
+#### 0.2.0
+* 18/04/2026: Add patchbay and automatic configuration (GG)
 #### 0.1.0
+* 01/04/2026: Rework configuration (GG)
 * 15/03/2026: Switch back to `pw_filter` (GG)
 #### 0.0.2
 * 24/12/2025: Separate driver and host realtime priorities (GG)
