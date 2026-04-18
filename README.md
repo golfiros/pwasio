@@ -59,8 +59,17 @@ users may try out both and figure out what suits them better.
 
 ### Configuration
 
-Configuration lives in the registry at `HKEY_CURRENT_USER\Software\ASIO\pwasio`
-and can be done through the ASIO control panel while the driver is loaded.
+Configuration lives in the registry at `HKEY_CURRENT_USER\Software\ASIO\pwasio`.
+Keys are:
+
+  - `buffer_size` DWORD -- fixed buffer size for the ASIO driver
+  - `sample_rate` DWORD -- fixed sample rate for the ASIO driver
+  - `priority` DWORD -- realtime priority for the ASIO driver
+  - `host_priority` DWORD -- realtime priority for the ASIO host
+  - `inputs`,`outputs` Multi-String -- respective list of ports to be used by
+  the driver in the format `<node.name>:<port.name>`.
+
+It can also be done through the ASIO control panel while the driver is loaded.
 Configuration is only saved by the driver if manually overriden in the panel.
 
 ![Screenshot](screenshot.jpg)
