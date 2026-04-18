@@ -97,10 +97,8 @@ priority defaults to half of driver priority.
 
 ### Change Log
 
-#### 0.2.0
-* 18/04/2026: Add patchbay and automatic configuration (GG)
 #### 0.1.0
-* 01/04/2026: Rework configuration (GG)
+* 18/04/2026: Add patchbay and automatic configuration (GG)
 * 15/03/2026: Switch back to `pw_filter` (GG)
 #### 0.0.2
 * 24/12/2025: Separate driver and host realtime priorities (GG)
