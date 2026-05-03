@@ -44,6 +44,50 @@ applications via
 WINEPREFIX=/path/to/prefix regsvr32 pwasio.dll
 ```
 
+### Steam / Proton (pressure-vessel container)
+
+Proton 9+ runs Wine inside a pressure-vessel container (steamrt4) that ships its
+own old PipeWire (≤ 1.4.x) and an isolated `/usr/lib/spa-0.2`. pwasio requires
+PipeWire 1.6+ and needs the matching SPA support plugin (`support.system`), which
+does not exist in that container. The symptom is:
+
+```
+can't make support.system handle: No such file or directory
+```
+
+**Workaround: bundle the host SPA support plugin alongside the DLL.**
+
+After building, run:
+
+```sh
+make bundle-spa
+```
+
+This copies `support/libspa-support.so` from the host's `/usr/lib/spa-0.2` into
+`lib/wine/x86_64-unix/pwasio-spa-0.2/support/`. If your host spa path is
+different (e.g., `/usr/lib64/spa-0.2`), override it:
+
+```sh
+make bundle-spa SPA_HOST_DIR=/usr/lib64/spa-0.2
+```
+
+Then install the bundle directory alongside the Unix DLL:
+
+```sh
+cp -r lib/wine/x86_64-unix/pwasio-spa-0.2 /path/to/winelibs/x86_64-unix/
+```
+
+At runtime, pwasio detects the `pwasio-spa-0.2/` directory next to `pwasio.dll.so`
+and prepends it to `SPA_PLUGIN_PATH` before calling `pw_init`, so the correct
+host-compiled plugins are found instead of the container's stale copies. The rest
+of PipeWire's spa graph (audio conversion, etc.) continues to load from the
+container normally.
+
+> **Note:** only `libspa-support.so` is bundled by default since that is the only
+> plugin missing from steamrt4. If you see further `No such file or directory`
+> errors for other spa handles, copy the relevant subdirectory from
+> `SPA_HOST_DIR` into `pwasio-spa-0.2/` and reinstall.
+
 ### General Information
 
 This project comes solely out of frustration of being unable to run Ableton Live

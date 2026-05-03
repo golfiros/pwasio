@@ -12,7 +12,7 @@ DIR_SRC := src
 DIR_GUARD = mkdir -p $(@D)
 
 CC := clang
-LIBS := -lodbc32 -lole32 -luuid -lwinmm -lshlwapi -lgdi32 -lcomctl32
+LIBS := -lodbc32 -lole32 -luuid -lwinmm -lshlwapi -lgdi32 -lcomctl32 -ldl
 PKG_CONFIG := libpipewire-0.3
 CFLAGS := -fPIC -Wextra -Wall -Wno-missing-field-initializers -std=gnu23
 DEFNS := -D_REENTRANT -D_GNU_SOURCE -DLIB_NAME='"$(LIB_NAME)"' -DDRIVER_REG='"$(DRIVER_REG)"'
@@ -60,8 +60,15 @@ $(WINETARGET): $(BINARIES) $(RESOURCES)
 	$(DIR_GUARD)
 	$(WINEBUILD) -m64 --dll --fake-module -E $(LIB_NAME).spec $^ -o $@
 
+SPA_HOST_DIR ?= /usr/lib/spa-0.2
+BUNDLE_SPA_DIR := $(DIR_LIB)/wine/x86_64-unix/pwasio-spa-0.2
+
+bundle-spa: $(TARGET)
+	mkdir -p $(BUNDLE_SPA_DIR)/support
+	cp $(SPA_HOST_DIR)/support/libspa-support.so $(BUNDLE_SPA_DIR)/support/
+
 clean:
 	rm -rf $(DIR_BLD)
 	rm -rf $(DIR_LIB)
 
-.PHONY: all clean
+.PHONY: all clean bundle-spa

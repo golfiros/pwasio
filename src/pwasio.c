@@ -36,6 +36,10 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/resource.h>
+#include <sys/stat.h>
+#include <dlfcn.h>
+#include <libgen.h>
+#include <limits.h>
 
 #include <commctrl.h>
 #include <shlwapi.h>
@@ -1878,6 +1882,34 @@ STDMETHODIMP_(LONG32) ControlPanel(struct asio *_data) {
 }
 STDMETHODIMP_(LONG32) not_impl() { return ASIO_ERROR_NOT_PRESENT; }
 
+static void setup_spa_plugin_path(void) {
+  Dl_info info = {0};
+  if (!dladdr((void *)Init, &info) || !info.dli_fname)
+    return;
+
+  char dll_dir[PATH_MAX];
+  strncpy(dll_dir, info.dli_fname, sizeof(dll_dir) - 1);
+  dll_dir[sizeof(dll_dir) - 1] = '\0';
+
+  char bundled_spa[PATH_MAX];
+  snprintf(bundled_spa, sizeof(bundled_spa), "%s/pwasio-spa-0.2", dirname(dll_dir));
+
+  struct stat st;
+  if (stat(bundled_spa, &st) != 0 || !S_ISDIR(st.st_mode))
+    return;
+
+  const char *existing = getenv("SPA_PLUGIN_PATH");
+  if (existing && existing[0]) {
+    size_t len = strlen(bundled_spa) + 1 + strlen(existing) + 1;
+    char *new_path = alloca(len);
+    snprintf(new_path, len, "%s:%s", bundled_spa, existing);
+    setenv("SPA_PLUGIN_PATH", new_path, 1);
+  } else {
+    setenv("SPA_PLUGIN_PATH", bundled_spa, 1);
+  }
+  WINE_TRACE("SPA_PLUGIN_PATH=%s\n", getenv("SPA_PLUGIN_PATH"));
+}
+
 HRESULT WINAPI CreateInstance(LPCLASSFACTORY _data, LPUNKNOWN outer, REFIID,
                               LPVOID *ptr) {
   WINE_TRACE("\n");
@@ -1926,6 +1958,7 @@ HRESULT WINAPI CreateInstance(LPCLASSFACTORY _data, LPUNKNOWN outer, REFIID,
   };
 
   WINE_TRACE("starting PipeWire\n");
+  setup_spa_plugin_path();
   pw_init(nullptr, nullptr);
   WINE_TRACE("compiled with libpipewire-%s\n", pw_get_headers_version());
   WINE_TRACE("linked with libpipewire-%s\n", pw_get_library_version());
