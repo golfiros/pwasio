@@ -61,7 +61,10 @@ $(WINETARGET): $(BINARIES) $(RESOURCES)
 	$(WINEBUILD) -m64 --dll --fake-module -E $(LIB_NAME).spec $^ -o $@
 
 SPA_HOST_DIR ?= /usr/lib/spa-0.2
+SPA_CONTAINER_DIR ?= /usr/lib/spa-0.2
 BUNDLE_SPA_DIR := $(DIR_LIB)/wine/x86_64-unix/pwasio-spa-0.2
+
+DEFNS += -DSPA_CONTAINER_DIR='"$(SPA_CONTAINER_DIR)"'
 
 bundle-spa: $(TARGET)
 	mkdir -p $(BUNDLE_SPA_DIR)/support

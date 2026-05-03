@@ -1898,16 +1898,25 @@ static void setup_spa_plugin_path(void) {
   if (stat(bundled_spa, &st) != 0 || !S_ISDIR(st.st_mode))
     return;
 
+  /* Build: <bundled>:<container-fallback>[:<existing>]
+   *
+   * Putting SPA_CONTAINER_DIR as the explicit second entry ensures that other
+   * Wine drivers (e.g. winepulse) can still find their spa plugins from the
+   * container even though libpipewire-1.6.4 is now in charge of the search.
+   * Without this, those drivers would fall back to whatever pw_init defaults
+   * to, which inside the pressure-vessel container resolves to the 1.4.x
+   * plugins that are incompatible with the host-linked 1.6.4 library. */
   const char *existing = getenv("SPA_PLUGIN_PATH");
-  if (existing && existing[0]) {
-    size_t len = strlen(bundled_spa) + 1 + strlen(existing) + 1;
-    char *new_path = alloca(len);
-    snprintf(new_path, len, "%s:%s", bundled_spa, existing);
-    setenv("SPA_PLUGIN_PATH", new_path, 1);
-  } else {
-    setenv("SPA_PLUGIN_PATH", bundled_spa, 1);
-  }
-  WINE_TRACE("SPA_PLUGIN_PATH=%s\n", getenv("SPA_PLUGIN_PATH"));
+  size_t len = strlen(bundled_spa) + 1 + sizeof(SPA_CONTAINER_DIR);
+  if (existing && existing[0])
+    len += 1 + strlen(existing);
+  char *new_path = alloca(len);
+  if (existing && existing[0])
+    snprintf(new_path, len, "%s:" SPA_CONTAINER_DIR ":%s", bundled_spa, existing);
+  else
+    snprintf(new_path, len, "%s:" SPA_CONTAINER_DIR, bundled_spa);
+  setenv("SPA_PLUGIN_PATH", new_path, 1);
+  WINE_TRACE("SPA_PLUGIN_PATH=%s\n", new_path);
 }
 
 HRESULT WINAPI CreateInstance(LPCLASSFACTORY _data, LPUNKNOWN outer, REFIID,
