@@ -1215,13 +1215,14 @@ CreateBuffers(struct asio *_data, struct asio_buffer_info *channels,
   if (buffer_size != (LONG32)pwasio->buffer_size)
     pwasio_err(ASIO_ERROR_INVALID_MODE, "invalid buffer size %d", buffer_size);
 
+  size_t pagesize = getpagesize();
   struct engine *engine = &pwasio->engine;
   *engine = (typeof(*engine)){
       .n_channels = n_channels,
 
       .fd = -1,
-      .maxsize = SPA_MAX(buffer_size * sizeof(float), (size_t)getpagesize()) /
-                 sizeof(float),
+      .maxsize = ((buffer_size * sizeof(float) + pagesize - 1) / pagesize) *
+                 pagesize / sizeof(float),
       .buffer = MAP_FAILED,
 
       .callbacks = callbacks,
@@ -1240,6 +1241,7 @@ CreateBuffers(struct asio *_data, struct asio_buffer_info *channels,
     snprintf(msg, sizeof msg, "buffer allocations failed");
     goto cleanup;
   }
+  WINE_TRACE("allocated fd %d\n", engine->fd);
 
   struct pw_properties *props;
   if (!(props = pw_properties_copy(pw_core_get_properties(context->core)))) {
@@ -1335,6 +1337,8 @@ CreateBuffers(struct asio *_data, struct asio_buffer_info *channels,
     *channel->port = c;
     for (size_t b = 0; b < 2; b++) {
       channel->offset[b] = offset * sizeof(float);
+      WINE_TRACE("%s %u buffer %lu @ %lu\n", info->input ? "input" : "output",
+                 info->index, b, channel->offset[b]);
       info->buf[b] = engine->buffer + offset;
       offset += engine->maxsize;
     }
